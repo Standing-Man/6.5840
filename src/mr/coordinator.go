@@ -83,13 +83,11 @@ func (c *Coordinator) Monitor(task Task) {
 }
 
 func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
-	c.mu.Lock()
-
 	if c.Done() {
 		reply.IsDone = true
-		c.mu.Unlock()
 		return nil
 	}
+	c.mu.Lock()
 
 	reply.WorkerId = c.workerId
 	c.workerId++
@@ -117,6 +115,7 @@ func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
 		task.TaskType = REDUCE
 		task.ReduceFiles = reduceFiles
 		task.ReduceId = reduceId
+		c.reduceBuckets[reduceId].setState(IN_PROGRESS)
 		reply.Tasks = task
 		go c.Monitor(task)
 		c.mu.Unlock()
@@ -131,12 +130,13 @@ func (c *Coordinator) AccpetInterFiles(args *TransferInterFilesArgs, reply *Tran
 	c.mu.Lock()
 	// Set the mapFile is finished
 	if c.mapFiles[args.MapFile] == COMPLETED {
+		reply.Finished = false
 		c.mu.Unlock()
 		return nil
 	}
+	// set the mapFile state is Complete
 	c.mapFiles[args.MapFile] = COMPLETED
 	for i := 0; i < c.nReduce; i++ {
-		// log.Printf("Successfuly to append the map file %s into bucket %d\n", args.InterFiles[i], i)
 		c.reduceBuckets[i].insertFile(args.InterFiles[i])
 	}
 	reply.Finished = true
@@ -147,6 +147,7 @@ func (c *Coordinator) AccpetInterFiles(args *TransferInterFilesArgs, reply *Tran
 func (c *Coordinator) AccpetResult(args *TransferResultArgs, reply *TransferResultReply) error {
 	c.mu.Lock()
 	if c.reduceBuckets[args.ReduceId].state == COMPLETED {
+		reply.Finished = false
 		c.mu.Unlock()
 		return nil
 	}
@@ -173,15 +174,16 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.mu.Lock()
 	ret := true
-
 	// Your code here.
 	for i := 0; i < len(c.reduceBuckets); i++ {
 		if c.reduceBuckets[i].state != COMPLETED {
+			c.mu.Unlock()
 			return !ret
 		}
 	}
-
+	c.mu.Unlock()
 	return ret
 }
 

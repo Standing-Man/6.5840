@@ -46,6 +46,7 @@ type TransferInterFilesArgs struct {
 
 type TransferInterFilesReply struct {
 	Finished bool
+	MapFile  string
 }
 
 type TransferResultArgs struct {
@@ -55,6 +56,7 @@ type TransferResultArgs struct {
 
 type TransferResultReply struct {
 	Finished bool
+	Result   string
 }
 
 // Cook up a unique-ish UNIX-domain socket name

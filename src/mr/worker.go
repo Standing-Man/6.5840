@@ -146,6 +146,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	node := Node{
+		Id:      -1,
 		mapf:    mapf,
 		reducef: reducef,
 	}
@@ -164,23 +165,26 @@ func (node *Node) RequestTask() {
 		if ok && reply.IsDone {
 			break
 		}
+		node.Id = reply.WorkerId
 		node.nReduce = reply.NReduce
 		if reply.Tasks.TaskType == MAP {
 			interFiles := node.ProcessMap(reply.Tasks.MapFile)
+			MapFile := reply.Tasks.MapFile
 			// transfer to Master
 			reply, _ := node.TransferInterFiles(interFiles, reply.Tasks.MapFile)
 			if reply.Finished {
-				// log.Println("Successfully transfer the intermediate files to master")
+				log.Printf("Successfully transfer the intermediate files %s to master\n", MapFile)
 			}
 		}
 
 		if reply.Tasks.TaskType == REDUCE {
 			result := node.progressReduce(reply.Tasks.ReduceFiles, reply.Tasks.ReduceId)
+			deleteFiles := reply.Tasks.ReduceFiles
 			// transfer to Master
-			ok := node.TransferResult(result, reply.Tasks.ReduceId)
-			if ok {
+			reply, ok := node.TransferResult(result, reply.Tasks.ReduceId)
+			if reply.Finished && ok {
 				// delete the intermediate files
-				removeInterFiles(reply.Tasks.ReduceFiles)
+				removeInterFiles(deleteFiles)
 			}
 		}
 	}
@@ -195,7 +199,7 @@ func removeInterFiles(filenames []string) {
 	}
 }
 
-func (node *Node) TransferResult(result string, reduceId int) bool {
+func (node *Node) TransferResult(result string, reduceId int) (*TransferResultReply, bool) {
 	args := TransferResultArgs{}
 	args.Result = result
 	args.ReduceId = reduceId
@@ -204,7 +208,7 @@ func (node *Node) TransferResult(result string, reduceId int) bool {
 
 	ok := call("Coordinator.AccpetResult", &args, &reply)
 
-	return ok
+	return &reply, ok
 }
 
 func (node *Node) TransferInterFiles(files []string, mapFile string) (*TransferInterFilesReply, bool) {
@@ -216,9 +220,7 @@ func (node *Node) TransferInterFiles(files []string, mapFile string) (*TransferI
 
 	ok := call("Coordinator.AccpetInterFiles", &args, &reply)
 
-	if ok {
-		return &reply, ok
-	}
+	
 	return &reply, ok
 
 }
