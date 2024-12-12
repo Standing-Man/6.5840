@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"time"
 )
 
 // for sorting by key.
@@ -45,11 +46,11 @@ func (node *Node) ProcessMap(mapFileName string) []string {
 	intermediate := []KeyValue{}
 	file, err := os.Open(mapFileName)
 	if err != nil {
-		log.Fatalf("cannot open %v", mapFileName)
+		log.Fatalf("WordId: %d: ProcessMap cannot open %s", node.Id, mapFileName)
 	}
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", mapFileName)
+		log.Fatalf("WordId: %d: ProcessMap cannot read %s", node.Id, mapFileName)
 	}
 	file.Close()
 	kva := node.mapf(mapFileName, string(content))
@@ -104,7 +105,7 @@ func (node *Node) progressReduce(reduceFiles []string, reduceId int) string {
 	for i := 0; i < len(reduceFiles); i++ {
 		file, err := os.Open(reduceFiles[i])
 		if err != nil {
-			log.Fatalf("cannot open %v", reduceFiles[i])
+			log.Fatalf("progressReduce: cannot open %v", reduceFiles[i])
 		}
 		// read the
 		dec := json.NewDecoder(file)
@@ -161,29 +162,37 @@ func Worker(mapf func(string, string) []KeyValue,
 
 func (node *Node) RequestTask() {
 	for {
-		reply, ok := node.AssignTask()
-		if ok && reply.IsDone {
+		assignReply, ok := node.AssignTask()
+		if !ok {
+			continue
+		}
+		if assignReply.WaitFlag {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		if assignReply.IsDone {
 			break
 		}
-		node.Id = reply.WorkerId
-		node.nReduce = reply.NReduce
-		if reply.Tasks.TaskType == MAP {
-			interFiles := node.ProcessMap(reply.Tasks.MapFile)
-			MapFile := reply.Tasks.MapFile
+		node.Id = assignReply.WorkerId
+		node.nReduce = assignReply.NReduce
+		if assignReply.Tasks.TaskType == MAP {
+			MapFile := assignReply.Tasks.MapFile
+			interFiles := node.ProcessMap(MapFile)
 			// transfer to Master
-			reply, _ := node.TransferInterFiles(interFiles, reply.Tasks.MapFile)
-			if reply.Finished {
-				log.Printf("Successfully transfer the intermediate files %s to master\n", MapFile)
+			TransInterReply, _ := node.TransferInterFiles(interFiles, MapFile)
+			if TransInterReply.Finished {
+				log.Printf("Successfully transfer the intermediate files %s to master\n", interFiles)
 			}
 		}
 
-		if reply.Tasks.TaskType == REDUCE {
-			result := node.progressReduce(reply.Tasks.ReduceFiles, reply.Tasks.ReduceId)
-			deleteFiles := reply.Tasks.ReduceFiles
+		if assignReply.Tasks.TaskType == REDUCE {
+			result := node.progressReduce(assignReply.Tasks.ReduceFiles, assignReply.Tasks.ReduceId)
+			deleteFiles := assignReply.Tasks.ReduceFiles
 			// transfer to Master
-			reply, ok := node.TransferResult(result, reply.Tasks.ReduceId)
-			if reply.Finished && ok {
+			TransResReply, ok := node.TransferResult(result, assignReply.Tasks.ReduceId)
+			if TransResReply.Finished && ok {
 				// delete the intermediate files
+				log.Printf("Delete the intermediate files %s from workerId %d", deleteFiles, assignReply.WorkerId)
 				removeInterFiles(deleteFiles)
 			}
 		}
@@ -203,6 +212,7 @@ func (node *Node) TransferResult(result string, reduceId int) (*TransferResultRe
 	args := TransferResultArgs{}
 	args.Result = result
 	args.ReduceId = reduceId
+	args.WordId = node.Id
 
 	reply := TransferResultReply{}
 
@@ -215,14 +225,13 @@ func (node *Node) TransferInterFiles(files []string, mapFile string) (*TransferI
 	args := TransferInterFilesArgs{}
 	args.InterFiles = files
 	args.MapFile = mapFile
+	args.WorkId = node.Id
 
 	reply := TransferInterFilesReply{}
 
 	ok := call("Coordinator.AccpetInterFiles", &args, &reply)
 
-	
 	return &reply, ok
-
 }
 
 func (node *Node) AssignTask() (*AssignReply, bool) {
@@ -232,9 +241,6 @@ func (node *Node) AssignTask() (*AssignReply, bool) {
 
 	ok := call("Coordinator.AssignTask", &args, &reply)
 
-	if ok {
-		return &reply, ok
-	}
 	return &reply, ok
 }
 

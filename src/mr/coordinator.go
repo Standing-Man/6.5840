@@ -65,21 +65,29 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) Monitor(task Task) {
-	time.Sleep(time.Duration(10))
+	time.Sleep(time.Second * 10)
 	c.mu.Lock()
 	if task.TaskType == MAP {
-		mapFile := task.MapFile
-		if c.mapFiles[mapFile] == IN_PROGRESS {
-			c.mapFiles[mapFile] = IDLE
+		if c.mapFiles[task.MapFile] == IN_PROGRESS {
+			c.mapFiles[task.MapFile] = IDLE
 		}
 	}
+
 	if task.TaskType == REDUCE {
-		reduceId := task.ReduceId
-		if c.reduceBuckets[reduceId].state == IN_PROGRESS {
-			c.reduceBuckets[reduceId].setState(IDLE)
+		if c.reduceBuckets[task.ReduceId].state == IN_PROGRESS {
+			c.reduceBuckets[task.ReduceId].setState(IDLE)
 		}
 	}
 	c.mu.Unlock()
+}
+
+func (c *Coordinator) shouldWait() bool {
+	for _, state := range c.mapFiles {
+		if state != COMPLETED {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
@@ -99,11 +107,19 @@ func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
 	mapFile, ok := c.GetMapTask()
 	if ok {
 		c.mapFiles[mapFile] = IN_PROGRESS
-		// log.Printf("Coordinator: Assign Map file: %s\n", mapFile)
+		log.Printf("Coordinator: Assign Map file to workerId %d: %s\n", reply.WorkerId, mapFile)
 		task.MapFile = mapFile
 		task.TaskType = MAP
-		go c.Monitor(task)
 		reply.Tasks = task
+		go c.Monitor(task)
+		c.mu.Unlock()
+		return nil
+	}
+
+	if c.shouldWait() {
+		reply.WaitFlag = true
+		reply.WorkerId = -1
+		c.workerId -= 1
 		c.mu.Unlock()
 		return nil
 	}
@@ -111,11 +127,11 @@ func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
 	reduceFiles, reduceId, ok := c.GetReduceTask()
 
 	if ok {
-		// log.Printf("Coordinator: Assign Reduce files: %s\n", reduceFiles)
+		log.Printf("Coordinator: Assign Reduce files to WorkerId %d: %s\n", reply.WorkerId, reduceFiles)
+		c.reduceBuckets[reduceId].setState(IN_PROGRESS)
 		task.TaskType = REDUCE
 		task.ReduceFiles = reduceFiles
 		task.ReduceId = reduceId
-		c.reduceBuckets[reduceId].setState(IN_PROGRESS)
 		reply.Tasks = task
 		go c.Monitor(task)
 		c.mu.Unlock()
@@ -135,9 +151,11 @@ func (c *Coordinator) AccpetInterFiles(args *TransferInterFilesArgs, reply *Tran
 		return nil
 	}
 	// set the mapFile state is Complete
+	log.Printf("Coordinator: accept intermediate files %s from WorkerId %d\n", args.InterFiles, args.WorkId)
 	c.mapFiles[args.MapFile] = COMPLETED
 	for i := 0; i < c.nReduce; i++ {
 		c.reduceBuckets[i].insertFile(args.InterFiles[i])
+		log.Printf("Bucket %d: %s\n",i, c.reduceBuckets[i].reduceFiles)
 	}
 	reply.Finished = true
 	c.mu.Unlock()
@@ -151,6 +169,7 @@ func (c *Coordinator) AccpetResult(args *TransferResultArgs, reply *TransferResu
 		c.mu.Unlock()
 		return nil
 	}
+	log.Printf("Coordinator: accept result files %s from WorkerId %d\n", args.Result, args.ReduceId)
 	c.reduceBuckets[args.ReduceId].setState(COMPLETED)
 	reply.Finished = true
 	c.mu.Unlock()

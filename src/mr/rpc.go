@@ -36,6 +36,7 @@ type AssignReply struct {
 	IsDone   bool
 	Tasks    Task
 	NReduce  int
+	WaitFlag bool
 }
 
 type TransferInterFilesArgs struct {
@@ -51,6 +52,7 @@ type TransferInterFilesReply struct {
 
 type TransferResultArgs struct {
 	Result   string
+	WordId   int
 	ReduceId int
 }
 
