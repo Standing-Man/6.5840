@@ -167,7 +167,7 @@ func (node *Node) RequestTask() {
 			continue
 		}
 		if assignReply.WaitFlag {
-			time.Sleep(10 * time.Second)
+			time.Sleep(4 * time.Second)
 			continue
 		}
 		if assignReply.IsDone {

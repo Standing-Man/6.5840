@@ -81,10 +81,19 @@ func (c *Coordinator) Monitor(task Task) {
 	c.mu.Unlock()
 }
 
-func (c *Coordinator) shouldWait() bool {
-	for _, state := range c.mapFiles {
-		if state != COMPLETED {
-			return true
+func (c *Coordinator) shouldWait(TaskType TASKTYPE) bool {
+	if TaskType == MAP {
+		for _, state := range c.mapFiles {
+			if state != COMPLETED {
+				return true
+			}
+		}
+	}
+	if TaskType == REDUCE {
+		for i:=0;i<len(c.reduceBuckets);i++{
+			if c.reduceBuckets[i].state != COMPLETED {
+				return true
+			}
 		}
 	}
 	return false
@@ -116,7 +125,7 @@ func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
 		return nil
 	}
 
-	if c.shouldWait() {
+	if c.shouldWait(MAP) {
 		reply.WaitFlag = true
 		reply.WorkerId = -1
 		c.workerId -= 1
@@ -134,6 +143,14 @@ func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
 		task.ReduceId = reduceId
 		reply.Tasks = task
 		go c.Monitor(task)
+		c.mu.Unlock()
+		return nil
+	}
+
+	if c.shouldWait(REDUCE) {
+		reply.WaitFlag = true
+		reply.WorkerId = -1
+		c.workerId -= 1
 		c.mu.Unlock()
 		return nil
 	}
