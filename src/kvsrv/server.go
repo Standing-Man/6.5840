@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -17,56 +17,58 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type KVServer struct {
 	mu sync.Mutex
 
-	// Your definitions here.
+	table  map[int64](Entry)
 	memory map[string]string
+}
+
+type Entry struct {
+	SeqNo      int64
+	ReplyValue string
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
-	// Your code here.
-	key := args.Key
-	if value, ok := kv.memory[key]; ok {
-		reply.Value = value
-	} else {
-		reply.Value = ""
-	}
-	kv.mu.Unlock()
+	defer kv.mu.Unlock()
+	reply.Value = kv.memory[args.Key]
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	kv.mu.Lock()
-	key := args.Key
-	oldValue, ok := kv.memory[key]
-	kv.memory[key] = args.Value
-	if ok {
-		reply.Value = oldValue
-	} else {
-		reply.Value = ""
+	defer kv.mu.Unlock()
+	entry, ok := kv.table[args.ClientId]
+	if ok && entry.SeqNo == args.SeqNo {
+		reply.Value = entry.ReplyValue
+		return
 	}
-	kv.mu.Unlock()
+	kv.memory[args.Key] = args.Value
+	kv.table[args.ClientId] = Entry{
+		SeqNo:      args.SeqNo,
+		ReplyValue: reply.Value,
+	}
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	kv.mu.Lock()
-	key := args.Key
-	oldValue, ok := kv.memory[key]
-	kv.memory[key] += args.Value
-	if ok {
-		reply.Value = oldValue
-	} else {
-		reply.Value = ""
+	defer kv.mu.Unlock()
+	entry, ok := kv.table[args.ClientId]
+	if ok && entry.SeqNo == args.SeqNo {
+		reply.Value = entry.ReplyValue
+		return
 	}
-	kv.mu.Unlock()
+	reply.Value = kv.memory[args.Key]
+	kv.memory[args.Key] += args.Value
+	kv.table[args.ClientId] = Entry{
+		SeqNo:      args.SeqNo,
+		ReplyValue: reply.Value,
+	}
+
 }
 
 func StartKVServer() *KVServer {
 	kv := new(KVServer)
 
 	// You may need initialization code here.
+	kv.table = make(map[int64]Entry)
 	kv.memory = make(map[string]string)
-	
-
 	return kv
 }
