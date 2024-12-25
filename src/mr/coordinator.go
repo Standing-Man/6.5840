@@ -38,6 +38,7 @@ type Coordinator struct {
 	nReduce       int
 	mapFiles      map[string]STATE
 	reduceBuckets map[int](*Bucket)
+	reduceTasks   map[int]int
 }
 
 type TASKTYPE int
@@ -75,6 +76,7 @@ func (c *Coordinator) Monitor(task Task) {
 
 	if task.TaskType == REDUCE {
 		if c.reduceBuckets[task.ReduceId].state == IN_PROGRESS {
+			c.reduceTasks[task.ReduceId] = -1
 			c.reduceBuckets[task.ReduceId].setState(IDLE)
 		}
 	}
@@ -90,7 +92,7 @@ func (c *Coordinator) shouldWait(TaskType TASKTYPE) bool {
 		}
 	}
 	if TaskType == REDUCE {
-		for i:=0;i<len(c.reduceBuckets);i++{
+		for i := 0; i < len(c.reduceBuckets); i++ {
 			if c.reduceBuckets[i].state != COMPLETED {
 				return true
 			}
@@ -138,6 +140,8 @@ func (c *Coordinator) AssignTask(args *AssignArgs, reply *AssignReply) error {
 	if ok {
 		log.Printf("Coordinator: Assign Reduce files to WorkerId %d: %s\n", reply.WorkerId, reduceFiles)
 		c.reduceBuckets[reduceId].setState(IN_PROGRESS)
+		// set buckct[reduceId] => WorkerId
+		c.reduceTasks[reduceId] = reply.WorkerId
 		task.TaskType = REDUCE
 		task.ReduceFiles = reduceFiles
 		task.ReduceId = reduceId
@@ -172,7 +176,7 @@ func (c *Coordinator) AccpetInterFiles(args *TransferInterFilesArgs, reply *Tran
 	c.mapFiles[args.MapFile] = COMPLETED
 	for i := 0; i < c.nReduce; i++ {
 		c.reduceBuckets[i].insertFile(args.InterFiles[i])
-		log.Printf("Bucket %d: %s\n",i, c.reduceBuckets[i].reduceFiles)
+		log.Printf("Bucket %d: %s\n", i, c.reduceBuckets[i].reduceFiles)
 	}
 	reply.Finished = true
 	c.mu.Unlock()
@@ -182,6 +186,11 @@ func (c *Coordinator) AccpetInterFiles(args *TransferInterFilesArgs, reply *Tran
 func (c *Coordinator) AccpetResult(args *TransferResultArgs, reply *TransferResultReply) error {
 	c.mu.Lock()
 	if c.reduceBuckets[args.ReduceId].state == COMPLETED {
+		reply.Finished = false
+		c.mu.Unlock()
+		return nil
+	}
+	if args.WordId != c.reduceTasks[args.ReduceId] {
 		reply.Finished = false
 		c.mu.Unlock()
 		return nil
@@ -248,11 +257,14 @@ func (c *Coordinator) initization(files []string, nReduce int) {
 	}
 
 	c.reduceBuckets = make(map[int]*Bucket)
+	c.reduceTasks = make(map[int]int)
 	for i := 0; i < nReduce; i++ {
 		c.reduceBuckets[i] = &Bucket{
 			state:       IDLE,
 			reduceFiles: []string{},
 		}
+		// assign reduce Bucket i to workId -1
+		c.reduceTasks[i] = -1
 	}
 }
 
