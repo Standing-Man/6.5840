@@ -204,23 +204,27 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	Debug(dVote, "S%d receive the vote request from Candidate %d", rf.me, args.CandidateId)
 
 	if args.Term < rf.currentTerm {
+		// args.Term < rf.currentTerm
 		Debug(dVote, "S%d: reject the vote request from %d: S%d have bigger term: %d", rf.me, args.CandidateId, rf.me, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
 
-	// check the candidate log is more update to date
-	updateToDate := false
-	if args.LastLogTerm >= rf.logs[len(rf.logs)-1].Term {
-		updateToDate = true
-	} else if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term {
-		if len(rf.logs) < args.LastLogIndex {
-			updateToDate = true
+	// rf.currentTerm == args.Term
+	if rf.currentTerm == args.Term {
+		if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+			Debug(dVote, "S%d: reject vote because it has been a candidate or voted for S%d on Term %d", rf.me, rf.votedFor, rf.currentTerm)
+			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
+			return
 		}
 	}
 
-	if updateToDate && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+	// check the candidate log is more update to date
+	updateToDate := rf.checkUpdate(args)
+
+	if updateToDate {
 		Debug(dVote, "S%d, grand the vote request from %d", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
@@ -229,6 +233,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
+}
+
+func (rf *Raft) checkUpdate(args *RequestVoteArgs) bool {
+	lastLogIndex := len(rf.logs) - 1
+	lastLogTerm := rf.logs[lastLogIndex].Term
+
+	if args.LastLogTerm >= lastLogTerm {
+		return true
+	}
+
+	if args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex {
+		return true
+	}
+	return false
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -318,7 +336,7 @@ func (rf *Raft) CovertToFollower(term int) {
 func (rf *Raft) CovertToLeader() {
 	Debug(dInfo, "S%d: Convert to Leader", rf.me)
 	rf.state = Leader
-	go rf.sendAppendRPCs(true)
+	rf.sendAppendRPCs(true)
 }
 
 func (rf *Raft) sendAppend(server int, heartbeat bool) {
@@ -343,7 +361,6 @@ func (rf *Raft) sendAppendRPCs(heartbeat bool) {
 		if i == rf.me {
 			continue
 		}
-		// 当表示为心跳包或者 该Leader新添了日志
 		if heartbeat {
 			rf.sendAppend(i, heartbeat)
 		}
@@ -397,6 +414,7 @@ func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.state = Candidate
 	rf.votedFor = rf.me
+	Debug(dClient, "S%d: Set Electtion timer as Convert to Candidate", rf.me)
 	rf.setElectionTime()
 
 	Debug(dClient, "S%d: Send the RequestVotes", rf.me)
@@ -412,6 +430,7 @@ func (rf *Raft) tick() {
 		rf.sendAppendRPCs(true)
 	} else {
 		if time.Now().After(rf.electionTime) {
+			Debug(dClient, "S%d: Election Timer Timeout", rf.me)
 			rf.startElection()
 		}
 	}
@@ -432,7 +451,6 @@ func (rf *Raft) setElectionTime() {
 	ms := 50 + (rand.Int63() % 300)
 	t = t.Add(time.Duration(ms) * time.Millisecond)
 	rf.electionTime = t
-	Debug(dClient, "S%d: setting elction timer", rf.me)
 }
 
 // the service or tester wants to create a Raft server. the ports
