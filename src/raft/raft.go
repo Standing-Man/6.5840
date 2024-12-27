@@ -50,7 +50,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-const ElectionInterval = 1 * time.Second
+const ElectionInterval = 50 * time.Millisecond
 
 type State int
 
@@ -218,9 +218,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 			return
-		}
+		} 
 	}
 
+	// rf.currentTerm < args.Term
+	rf.CovertToFollower(args.Term)
+	rf.setElectionTime()
 	// check the candidate log is more update to date
 	updateToDate := rf.checkUpdate(args)
 
@@ -229,7 +232,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
-		rf.CovertToFollower(args.Term)
 		return
 	}
 
@@ -331,6 +333,7 @@ func (rf *Raft) CovertToFollower(term int) {
 	Debug(dInfo, "S%d: Convert to follower", rf.me)
 	rf.currentTerm = term
 	rf.state = Follower
+	rf.votedFor = -1
 }
 
 func (rf *Raft) CovertToLeader() {
@@ -439,16 +442,16 @@ func (rf *Raft) tick() {
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 		rf.tick()
-		ms := 50
-		// sleep 50 ms to check the server's state
+		ms := 100
+		// sleep 100 ms to check the server's state
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
 func (rf *Raft) setElectionTime() {
 	t := time.Now()
-	t = t.Add(ElectionInterval)
-	ms := 50 + (rand.Int63() % 300)
+	// t = t.Add(ElectionInterval)
+	ms := 150 + (rand.Int63() % 150)
 	t = t.Add(time.Duration(ms) * time.Millisecond)
 	rf.electionTime = t
 }
