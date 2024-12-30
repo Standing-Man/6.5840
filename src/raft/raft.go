@@ -50,7 +50,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-const ElectionInterval = 50 * time.Millisecond
+const ElectionInterval = 1 * time.Second
 
 type State int
 
@@ -218,7 +218,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 			return
-		} 
+		}
 	}
 
 	// rf.currentTerm < args.Term
@@ -380,6 +380,7 @@ func (rf *Raft) requestVote(server int, arg *RequestVoteArgs, votes *int) {
 
 		if reply.Term > rf.currentTerm {
 			rf.CovertToFollower(reply.Term)
+			rf.setElectionTime()
 			return
 		}
 
