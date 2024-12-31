@@ -15,11 +15,21 @@
 ## Lab 2: Key/Value Server
 
 - [x] Key/value server with no network failures
-- [x] Key/value server with dropped messages 
+- [x] Key/value server with dropped messages
 
 ## Lab 3: Raft
 
-- Part 3A: leader election
+- Part 3A: leader election => Pass six thousand times
   - [x] initial election
-  - [ ] election after network failure
-  - [ ] multiple elections
+  - [x] election after network failure
+  - [x] multiple elections
+
+- Part 3B: log
+  - [ ] basic agreement
+  - [ ] RPC byte count
+  - [ ] agreement after follower reconnects
+  - [ ] no agreement if too many followers disconnect
+  - [ ] concurrent Start()s
+  - [ ] rejoin of partitioned leader
+  - [ ] leader backs up quickly over incorrect follower logs
+  - [ ] RPC counts aren't too high
