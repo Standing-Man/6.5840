@@ -172,6 +172,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
+		Debug(dClient, "S%d: fail to append entry or heart, because the rf.currentTerm > Leader%d.Term", rf.me, args.LeaderId)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -179,12 +180,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= len(rf.logs) || (rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		// follow AppendEntryRPC rule 2
 		// illustrate the logs is inconsistent between leader and follower
+		Debug(dClient, "S%d: fail to append entry because logs inconsistet", rf.me)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
 	}
 
-	// rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm && rf.currentTerm >= args.Term
+	// rf.logs[args.PrevLogIndex].Term == args.PrevLogTerm && rf.currentTerm >= args.Term
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
@@ -192,13 +194,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.CovertToFollower(args.Term)
 
 	// append entry into rf.logs
-	if len(rf.logs) > args.PrevLogIndex {
-		rf.logs = rf.logs[:args.PrevLogIndex+1]
+	// follow AppendEntry rule 3, 4
+	/***
+	>> rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
+	this is wrong, because if the leader send a outdated appendEntry RPC
+	**/
+	index := 1 + args.PrevLogIndex
+	for index < len(rf.logs) && index-args.PrevLogIndex-1 < len(args.Entries) {
+		if rf.logs[index].Term != args.Entries[index-args.PrevLogIndex-1].Term {
+			// delete the existing entry and all that follow it
+			rf.logs = rf.logs[:index]
+			break
+		}
+		index += 1
 	}
-	rf.logs = append(rf.logs, args.Entries...)
+	// append new entries not already in the log
+	if index-args.PrevLogIndex-1 < len(args.Entries) {
+		rf.logs = append(rf.logs, args.Entries[index-args.PrevLogIndex-1:]...)
+	}
+	Debug(dClient, "S%d: successfully append entry into logs: %v", rf.me, rf.logs)
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		Debug(dClient, "S%d: Update the commitIndex : %d", rf.me, rf.commitIndex)
 	}
 }
 
@@ -259,7 +277,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	updateToDate := rf.checkUpdate(args)
 
 	if updateToDate {
-		Debug(dVote, "S%d, grand the vote request from %d", rf.me, args.CandidateId)
+		Debug(dVote, "S%d, grand the vote request from %d: Term: %d", rf.me, args.CandidateId, args.Term)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
@@ -272,7 +290,7 @@ func (rf *Raft) checkUpdate(args *RequestVoteArgs) bool {
 	lastLogIndex := len(rf.logs) - 1
 	lastLogTerm := rf.logs[lastLogIndex].Term
 
-	if args.LastLogTerm >= lastLogTerm {
+	if args.LastLogTerm > lastLogTerm {
 		return true
 	}
 
@@ -384,6 +402,11 @@ func (rf *Raft) CovertToFollower(term int) {
 func (rf *Raft) CovertToLeader() {
 	Debug(dInfo, "S%d: Convert to Leader", rf.me)
 	rf.state = Leader
+	// reinitializaed after election
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = len(rf.logs)
+		rf.matchIndex[i] = 0
+	}
 	rf.sendAppendRPCs(true)
 }
 
@@ -409,7 +432,8 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 				rf.setElectionTime()
 				return
 			}
-			if heartbeat {
+			if rf.currentTerm != args.Term || heartbeat {
+				// compare the current term with the term you sent in your appendEntry RPC
 				return
 			}
 			if !reply.Success {
@@ -421,8 +445,8 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 			} else {
 				//Successfully append entry
 				Debug(dLeader, "S%d: Successfully append entry to S%d", rf.me, server)
-				rf.nextIndex[server] += len(args.Entries)
-				rf.matchIndex[server] += len(args.Entries)
+				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+				rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 				rf.checkCommit()
 			}
 
@@ -486,15 +510,21 @@ func (rf *Raft) requestVoteRPCs() {
 }
 
 func (rf *Raft) checkCommit() {
+	Debug(dLeader, "S%d check Commit, rf.matchIndex: %v", rf.me, rf.matchIndex)
 	for N := rf.commitIndex + 1; N < len(rf.logs); N++ {
-		count := 0
-		for i := range rf.peers {
+		count := 1
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
 			if rf.matchIndex[i] >= N && rf.logs[N].Term == rf.currentTerm {
 				count++
 			}
-		}
-		if count >= len(rf.peers)/2+1 {
-			rf.commitIndex = N
+			if count >= (len(rf.peers)/2)+1 {
+				rf.commitIndex = N
+				Debug(dLeader, "S%d update CommitIndex: %d", rf.commitIndex, N)
+				break
+			}
 		}
 	}
 }
@@ -535,6 +565,13 @@ func (rf *Raft) ticker() {
 	}
 }
 
+/*
+*
+methods:
+ 1. use dedicated “applier” to detect the Raft node need to send entry into applyCh
+ 2. use mutex to lock around these applies, so that some other routine doesn’t also detect
+    that entries need to be applied and also tries to apply
+*/
 func (rf *Raft) apply() {
 	for {
 		rf.mu.Lock()
@@ -554,6 +591,13 @@ func (rf *Raft) apply() {
 	}
 }
 
+/*
+* only three scenarios:
+ 1. you get an AppendEntries RPC from the current leader
+    (i.e., if the term in the AppendEntries arguments is outdated, you should not reset your timer)
+ 2. you are starting an election;
+ 3. you grant a vote to another peer
+*/
 func (rf *Raft) setElectionTime() {
 	t := time.Now()
 	// t = t.Add(ElectionInterval)
