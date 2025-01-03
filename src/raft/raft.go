@@ -166,6 +166,24 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// optimizate that backs up nextIndex
+	XTerm  int
+	XIndex int
+	XLen   int
+}
+
+func (rf *Raft) firstIndex(term int, startIndex int) int {
+	for i := startIndex; i > 0; i-- {
+		if rf.logs[i].Term == term && rf.logs[i-1].Term != term {
+			return i
+		}
+	}
+	/** conditions:
+	1. i == 0
+	2. The term is same form start to end.
+	**/
+	return 1
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -181,6 +199,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// follow AppendEntryRPC rule 2
 		// illustrate the logs is inconsistent between leader and follower
 		Debug(dClient, "S%d: fail to append entry because logs inconsistet", rf.me)
+		// Optimize for backing up nextIndex
+		if args.PrevLogIndex >= len(rf.logs) {
+			reply.XLen = len(rf.logs)
+		} else {
+			if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+				reply.Term = rf.logs[args.PrevLogIndex].Term
+				reply.XIndex = rf.firstIndex(reply.Term, args.PrevLogIndex)
+			}
+		}
+
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -439,7 +467,7 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 			if !reply.Success {
 				// Condition: log inconsistency
 				Debug(dLeader, "S%d: fail to append entry to S%d", rf.me, server)
-				rf.nextIndex[server] -= 1
+				rf.nextIndex[server] = rf.pickupNext(reply)
 				rf.sendAppend(server, heartbeat)
 				return
 			} else {
@@ -452,6 +480,28 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 
 		}
 	}()
+}
+
+func (rf *Raft) checkLog(term int) (int, bool) {
+	for i := len(rf.logs) - 1; i > 0; i-- {
+		if rf.logs[i].Term == term {
+			return i, true
+		}
+	}
+	return 1, false
+}
+
+func (rf *Raft) pickupNext(reply AppendEntriesReply) int {
+	if reply.XLen != 0 {
+		// follower's log is too short
+		return reply.XLen
+	} else {
+		if index, existed := rf.checkLog(reply.XTerm); existed {
+			return index
+		} else {
+			return reply.XIndex
+		}
+	}
 }
 
 func (rf *Raft) sendAppendRPCs(heartbeat bool) {
