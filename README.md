@@ -25,11 +25,11 @@
   - [x] multiple elections
 
 - Part 3B: log
-  - [ ] basic agreement
-  - [ ] RPC byte count
-  - [ ] agreement after follower reconnects
-  - [ ] no agreement if too many followers disconnect
-  - [ ] concurrent Start()s
-  - [ ] rejoin of partitioned leader
-  - [ ] leader backs up quickly over incorrect follower logs
-  - [ ] RPC counts aren't too high
+  - [x] basic agreement
+  - [x] RPC byte count
+  - [x] agreement after follower reconnects
+  - [x] no agreement if too many followers disconnect
+  - [x] concurrent Start()s
+  - [x] rejoin of partitioned leader
+  - [x] leader backs up quickly over incorrect follower logs
+  - [x] RPC counts aren't too high
