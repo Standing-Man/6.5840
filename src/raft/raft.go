@@ -195,6 +195,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	}
+
+	// args.Term >= rf.currentTerm
+	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.state == Candidate) {
+		rf.CovertToFollower(args.Term)
+	}
+	rf.setElectionTime()
+
 	if args.PrevLogIndex >= len(rf.logs) || (rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		// follow AppendEntryRPC rule 2
 		// illustrate the logs is inconsistent between leader and follower
@@ -218,8 +225,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	rf.setElectionTime()
-	rf.CovertToFollower(args.Term)
 
 	// append entry into rf.logs
 	// follow AppendEntry rule 3, 4
@@ -300,18 +305,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// rf.currentTerm < args.Term
 	rf.CovertToFollower(args.Term)
-	rf.setElectionTime()
 	// check the candidate log is more update to date
 	updateToDate := rf.checkUpdate(args)
 
-	if updateToDate {
-		Debug(dVote, "S%d, grand the vote request from %d: Term: %d", rf.me, args.CandidateId, args.Term)
-		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
+	if !updateToDate {
+		Debug(dVote, "S%d: reject the vote, because the log is not update to date.")
+		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
 	}
 
+	Debug(dVote, "S%d, grand the vote request from %d: Term: %d", rf.me, args.CandidateId, args.Term)
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
+	reply.Term = rf.currentTerm
+	rf.setElectionTime()
 }
 
 func (rf *Raft) checkUpdate(args *RequestVoteArgs) bool {
@@ -534,6 +542,7 @@ func (rf *Raft) requestVote(server int, arg *RequestVoteArgs, votes *int) {
 			*votes += 1
 			if *votes >= (len(rf.peers)/2)+1 {
 				if rf.currentTerm == arg.Term && rf.state == Candidate {
+					// 
 					rf.CovertToLeader()
 					rf.sendAppendRPCs(true)
 				}
@@ -651,7 +660,7 @@ func (rf *Raft) apply() {
 func (rf *Raft) setElectionTime() {
 	t := time.Now()
 	// t = t.Add(ElectionInterval)
-	ms := 150 + (rand.Int63() % 150)
+	ms := 150 + (rand.Int63() % 450)
 	t = t.Add(time.Duration(ms) * time.Millisecond)
 	rf.electionTime = t
 }
