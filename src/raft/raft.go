@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -115,14 +117,13 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -130,19 +131,26 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []Entry
+	if d.Decode(&currentTerm) != nil {
+		Debug(dPersist, "S%d", "S%d: failed to readPersist: currentTerm")
+	} else {
+		rf.currentTerm = currentTerm
+	}
+	if d.Decode(&votedFor) != nil {
+		Debug(dPersist, "S%d", "S%d: failed to readPersist: voteFor")
+	} else {
+		rf.votedFor = votedFor
+	}
+	if d.Decode(&logs) != nil {
+		Debug(dPersist, "S%d", "S%d: failed to readPersist: voteFor")
+	} else {
+		rf.logs = logs
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -197,28 +205,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// args.Term >= rf.currentTerm
-	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.state == Candidate) {
+	if args.Term > rf.currentTerm {
 		rf.CovertToFollower(args.Term)
+	} else if args.Term == rf.currentTerm {
+		if rf.state == Candidate {
+			rf.state = Follower
+		}
 	}
 	rf.setElectionTime()
 
-	if args.PrevLogIndex >= len(rf.logs) || (rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
-		// follow AppendEntryRPC rule 2
-		// illustrate the logs is inconsistent between leader and follower
-		Debug(dClient, "S%d: fail to append entry because logs inconsistet", rf.me)
-		// Optimize for backing up nextIndex
-		if args.PrevLogIndex >= len(rf.logs) {
-			reply.XLen = len(rf.logs)
-		} else {
-			if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-				reply.Term = rf.logs[args.PrevLogIndex].Term
-				reply.XIndex = rf.firstIndex(reply.Term, args.PrevLogIndex)
-			}
-		}
+	reply.Term = rf.currentTerm
 
+	if args.PrevLogIndex >= len(rf.logs) {
 		reply.Success = false
-		reply.Term = rf.currentTerm
+		reply.XLen = len(rf.logs)
 		return
+	} else {
+		if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.XTerm = rf.logs[args.PrevLogIndex].Term
+			reply.XIndex = rf.firstIndex(reply.Term, args.PrevLogIndex)
+			reply.Success = false
+			return
+		}
 	}
 
 	// rf.logs[args.PrevLogIndex].Term == args.PrevLogTerm && rf.currentTerm >= args.Term
@@ -237,6 +245,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.logs[index].Term != args.Entries[index-args.PrevLogIndex-1].Term {
 			// delete the existing entry and all that follow it
 			rf.logs = rf.logs[:index]
+			rf.persist()
 			break
 		}
 		index += 1
@@ -244,6 +253,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// append new entries not already in the log
 	if index-args.PrevLogIndex-1 < len(args.Entries) {
 		rf.logs = append(rf.logs, args.Entries[index-args.PrevLogIndex-1:]...)
+		rf.persist()
 	}
 	Debug(dClient, "S%d: successfully append entry into logs: %v", rf.me, rf.logs)
 
@@ -301,24 +311,29 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = rf.currentTerm
 			return
 		}
+		if rf.state == Leader {
+			Debug(dVote, "S%d already be a Leader, So reject vote!")
+			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
+		}
 	}
 
 	// rf.currentTerm < args.Term
 	rf.CovertToFollower(args.Term)
 	// check the candidate log is more update to date
 	updateToDate := rf.checkUpdate(args)
+	reply.Term = rf.currentTerm
 
 	if !updateToDate {
 		Debug(dVote, "S%d: reject the vote, because the log is not update to date.")
 		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
 		return
 	}
 
 	Debug(dVote, "S%d, grand the vote request from %d: Term: %d", rf.me, args.CandidateId, args.Term)
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	reply.VoteGranted = true
-	reply.Term = rf.currentTerm
 	rf.setElectionTime()
 }
 
@@ -402,6 +417,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    term,
 		Command: command,
 	})
+	rf.persist()
 	index = len(rf.logs) - 1
 
 	rf.sendAppendRPCs(false)
@@ -433,11 +449,13 @@ func (rf *Raft) CovertToFollower(term int) {
 	rf.currentTerm = term
 	rf.state = Follower
 	rf.votedFor = -1
+	rf.persist()
 }
 
 func (rf *Raft) CovertToLeader() {
 	Debug(dInfo, "S%d: Convert to Leader", rf.me)
 	rf.state = Leader
+	rf.persist()
 	// reinitializaed after election
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.logs)
@@ -542,7 +560,6 @@ func (rf *Raft) requestVote(server int, arg *RequestVoteArgs, votes *int) {
 			*votes += 1
 			if *votes >= (len(rf.peers)/2)+1 {
 				if rf.currentTerm == arg.Term && rf.state == Candidate {
-					// 
 					rf.CovertToLeader()
 					rf.sendAppendRPCs(true)
 				}
@@ -579,7 +596,7 @@ func (rf *Raft) checkCommit() {
 			if rf.matchIndex[i] >= N && rf.logs[N].Term == rf.currentTerm {
 				count++
 			}
-			if count >= (len(rf.peers)/2)+1 {
+			if count >= (len(rf.peers)/2)+1 && rf.state == Leader {
 				rf.commitIndex = N
 				Debug(dLeader, "S%d update CommitIndex: %d", rf.commitIndex, N)
 				break
@@ -593,6 +610,7 @@ func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.state = Candidate
 	rf.votedFor = rf.me
+	rf.persist()
 	Debug(dClient, "S%d: Set Election timer as Convert to Candidate", rf.me)
 	rf.setElectionTime()
 

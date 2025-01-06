@@ -33,3 +33,21 @@
   - [x] rejoin of partitioned leader
   - [x] leader backs up quickly over incorrect follower logs
   - [x] RPC counts aren't too high
+
+- Part 3C: persistence => Just pass once
+  - [x] basic persistence
+  - [x] more persistence
+  - [x] partitioned leader and one follower crash, leader restarts
+  - [x] Figure 8
+  - [x] unreliable agreement
+  - [x] Figure 8 (unreliable)
+  - [x] churn
+  - [x] unreliable churn
+  
+- Part 3D: log compaction
+  - [ ] snapshots basic
+  - [ ] install snapshots (disconnect)
+  - [ ] install snapshots (disconnect+unreliable)
+  - [ ] install snapshots (crash)
+  - [ ] install snapshots (unreliable+crash)
+  - [ ] crash and restart all servers
