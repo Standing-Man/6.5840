@@ -198,7 +198,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
-		Debug(dClient, "S%d: fail to append entry or heart, because the rf.currentTerm > Leader%d.Term", rf.me, args.LeaderId)
+		Debug(dAppe, "S%d have a higher term %d", rf.me, rf.currentTerm)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -217,11 +217,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 
 	if args.PrevLogIndex >= len(rf.logs) {
+		Debug(dAppe, "S%d's logs is short", rf.me)
 		reply.Success = false
 		reply.XLen = len(rf.logs)
 		return
 	} else {
 		if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+			Debug(dAppe, "S%d's logs isn't consistent with Leader's", rf.me)
 			reply.XTerm = rf.logs[args.PrevLogIndex].Term
 			reply.XIndex = rf.firstIndex(reply.Term, args.PrevLogIndex)
 			reply.Success = false
@@ -232,7 +234,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// rf.logs[args.PrevLogIndex].Term == args.PrevLogTerm && rf.currentTerm >= args.Term
 
 	reply.Success = true
-	reply.Term = rf.currentTerm
 
 	// append entry into rf.logs
 	// follow AppendEntry rule 3, 4
@@ -252,14 +253,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// append new entries not already in the log
 	if index-args.PrevLogIndex-1 < len(args.Entries) {
+		Debug(dAppe, "S%d successfully append the entry", rf.me)
 		rf.logs = append(rf.logs, args.Entries[index-args.PrevLogIndex-1:]...)
 		rf.persist()
 	}
-	Debug(dClient, "S%d: successfully append entry into logs: %v", rf.me, rf.logs)
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		Debug(dClient, "S%d: Update the commitIndex : %d", rf.me, rf.commitIndex)
+		Debug(dCommit, "S%d: process the commandIndex %d", rf.me, rf.commitIndex)
 	}
 }
 
@@ -293,11 +294,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	Debug(dVote, "S%d receive the vote request from Candidate %d", rf.me, args.CandidateId)
 
 	if args.Term < rf.currentTerm {
 		// args.Term < rf.currentTerm
-		Debug(dVote, "S%d: reject the vote request from %d: S%d have bigger term: %d", rf.me, args.CandidateId, rf.me, rf.currentTerm)
+		Debug(dVote, "S%d have higher term %d for Candidate %d", rf.me, rf.currentTerm, args.CandidateId)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -306,13 +306,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// rf.currentTerm == args.Term
 	if rf.currentTerm == args.Term {
 		if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-			Debug(dVote, "S%d: reject vote because it has been a candidate or voted for S%d on Term %d", rf.me, rf.votedFor, rf.currentTerm)
+			Debug(dVote, "S%d have voted for Candidate %d", rf.me, rf.votedFor)
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 			return
 		}
 		if rf.state == Leader {
-			Debug(dVote, "S%d already be a Leader, So reject vote!")
+			Debug(dVote, "S%d is a Leader on Current Term %d", rf.me, rf.currentTerm)
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 		}
@@ -325,12 +325,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 
 	if !updateToDate {
-		Debug(dVote, "S%d: reject the vote, because the log is not update to date.")
+		Debug(dVote, "S%d: the Candidate %d's logs is not update to date", rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
 
-	Debug(dVote, "S%d, grand the vote request from %d: Term: %d", rf.me, args.CandidateId, args.Term)
+	Debug(dVote, "S%d grand the vote request from Candadate %d", rf.me, args.CandidateId)
 	rf.votedFor = args.CandidateId
 	rf.persist()
 	reply.VoteGranted = true
@@ -419,6 +419,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	})
 	rf.persist()
 	index = len(rf.logs) - 1
+	Debug(dClient, "S%d receive an command %v", rf.me, command)
 
 	rf.sendAppendRPCs(false)
 
@@ -445,7 +446,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) CovertToFollower(term int) {
-	Debug(dInfo, "S%d: Convert to follower", rf.me)
+	Debug(dCtoF, "S%d: Convert to Follower", rf.me)
 	rf.currentTerm = term
 	rf.state = Follower
 	rf.votedFor = -1
@@ -453,7 +454,7 @@ func (rf *Raft) CovertToFollower(term int) {
 }
 
 func (rf *Raft) CovertToLeader() {
-	Debug(dInfo, "S%d: Convert to Leader", rf.me)
+	Debug(dCtoL, "S%d: Convert to Leader", rf.me)
 	rf.state = Leader
 	rf.persist()
 	// reinitializaed after election
@@ -472,10 +473,14 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 	}
 	args.PrevLogIndex = rf.nextIndex[server] - 1
 	args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-	args.Entries = make([]Entry, len(rf.logs[rf.nextIndex[server]:]))
-	copy(args.Entries, rf.logs[rf.nextIndex[server]:])
-	Debug(dLeader, "S%d: send append entry to S%d: send the entry: %v", rf.me, server, args)
+
+	lastLogIndex := len(rf.logs) - 1
+	if lastLogIndex >= rf.nextIndex[server] {
+		args.Entries = make([]Entry, len(rf.logs[rf.nextIndex[server]:]))
+		copy(args.Entries, rf.logs[rf.nextIndex[server]:])
+	}
 	go func() {
+		Debug(dInfo, "S%d: send Append Entry RPC to S%d", rf.me, server)
 		var reply AppendEntriesReply
 		ok := rf.sendAppendEntries(server, &args, &reply)
 		if ok {
@@ -486,19 +491,23 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 				rf.setElectionTime()
 				return
 			}
-			if rf.currentTerm != args.Term || heartbeat {
+			if rf.currentTerm != args.Term {
 				// compare the current term with the term you sent in your appendEntry RPC
 				return
 			}
 			if !reply.Success {
 				// Condition: log inconsistency
-				Debug(dLeader, "S%d: fail to append entry to S%d", rf.me, server)
-				rf.nextIndex[server] = rf.pickupNext(reply)
-				rf.sendAppend(server, heartbeat)
-				return
+				index := rf.pickupNext(reply)
+				Debug(dRepl, "S%d update nextIndex[%d] %d -> %d", rf.me, server, rf.nextIndex[server], index)
+				rf.nextIndex[server] = index
+				rf.sendAppendRPCs(false)
 			} else {
 				//Successfully append entry
-				Debug(dLeader, "S%d: Successfully append entry to S%d", rf.me, server)
+				if heartbeat {
+					return
+				}
+				Debug(dRepl, "S%d update matchIndex[%d] %d -> %d", rf.me, server, rf.matchIndex[server], args.PrevLogIndex+len(args.Entries))
+				Debug(dRepl, "S%d update nextIndex[%d] %d -> %d", rf.me, server, rf.nextIndex[server], args.PrevLogIndex+len(args.Entries)+1)
 				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 				rf.checkCommit()
@@ -536,7 +545,7 @@ func (rf *Raft) sendAppendRPCs(heartbeat bool) {
 			continue
 		}
 		lastLogIndex := len(rf.logs) - 1
-		if heartbeat || lastLogIndex >= rf.nextIndex[i] {
+		if lastLogIndex >= rf.nextIndex[i] || heartbeat {
 			rf.sendAppend(i, heartbeat)
 		}
 	}
@@ -544,7 +553,7 @@ func (rf *Raft) sendAppendRPCs(heartbeat bool) {
 
 func (rf *Raft) requestVote(server int, arg *RequestVoteArgs, votes *int) {
 	var reply RequestVoteReply
-	Debug(dVote, "S%v send the requestVoteRPC to S%v", rf.me, server)
+	Debug(dInfo, "S%d: send Request Vote to S%d", rf.me, server)
 	ok := rf.sendRequestVote(server, arg, &reply)
 	if ok {
 		rf.mu.Lock()
@@ -586,7 +595,6 @@ func (rf *Raft) requestVoteRPCs() {
 }
 
 func (rf *Raft) checkCommit() {
-	Debug(dLeader, "S%d check Commit, rf.matchIndex: %v", rf.me, rf.matchIndex)
 	for N := rf.commitIndex + 1; N < len(rf.logs); N++ {
 		count := 1
 		for i := 0; i < len(rf.peers); i++ {
@@ -597,8 +605,8 @@ func (rf *Raft) checkCommit() {
 				count++
 			}
 			if count >= (len(rf.peers)/2)+1 && rf.state == Leader {
+				Debug(dCommit, "S%d push the commitIndex to %d", rf.me, N)
 				rf.commitIndex = N
-				Debug(dLeader, "S%d update CommitIndex: %d", rf.commitIndex, N)
 				break
 			}
 		}
@@ -611,10 +619,8 @@ func (rf *Raft) startElection() {
 	rf.state = Candidate
 	rf.votedFor = rf.me
 	rf.persist()
-	Debug(dClient, "S%d: Set Election timer as Convert to Candidate", rf.me)
 	rf.setElectionTime()
 
-	Debug(dClient, "S%d: Send the RequestVotes", rf.me)
 	rf.requestVoteRPCs()
 }
 
@@ -627,7 +633,7 @@ func (rf *Raft) tick() {
 		rf.sendAppendRPCs(true)
 	} else {
 		if time.Now().After(rf.electionTime) {
-			Debug(dClient, "S%d: Election Timer Timeout", rf.me)
+			Debug(dTimer, "S%d: Election Timer timeout", rf.me)
 			rf.startElection()
 		}
 	}
@@ -652,14 +658,14 @@ methods:
 func (rf *Raft) apply() {
 	for {
 		rf.mu.Lock()
-		if rf.commitIndex > rf.lastApplied {
+		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied += 1
 			msg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[rf.lastApplied].Command,
 				CommandIndex: rf.lastApplied,
 			}
-			Debug(dCommit, "S%d send msg to Apply Msg: %v", rf.me, msg)
+			Debug(dAppl, "S%d send msg %v into applyCh", rf.me, msg)
 			rf.applyCh <- msg
 		}
 		rf.mu.Unlock()
@@ -700,7 +706,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
-	Debug(dClient, "S%d: Create a Raft server", rf.me)
+	Debug(dInfo, "S%d: Create a Raft Server", rf.me)
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
