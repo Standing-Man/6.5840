@@ -495,7 +495,7 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 				rf.setElectionTime()
 				return
 			}
-			if rf.currentTerm != args.Term {
+			if rf.currentTerm != args.Term || rf.state != Leader {
 				// compare the current term with the term you sent in your appendEntry RPC
 				return
 			}
