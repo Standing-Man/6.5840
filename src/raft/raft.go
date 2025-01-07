@@ -181,8 +181,8 @@ type AppendEntriesReply struct {
 	XLen   int
 }
 
-func (rf *Raft) firstIndex(term int, startIndex int) int {
-	for i := startIndex; i > 0; i-- {
+func (rf *Raft) firstIndex(term int, endIndex int) int {
+	for i := endIndex; i > 0; i-- {
 		if rf.logs[i].Term == term && rf.logs[i-1].Term != term {
 			return i
 		}
@@ -191,7 +191,11 @@ func (rf *Raft) firstIndex(term int, startIndex int) int {
 	1. i == 0
 	2. The term is same form start to end.
 	**/
-	return 1
+	if endIndex == 0 {
+		return 0
+	} else {
+		return 1
+	}
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -225,7 +229,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 			Debug(dAppe, "S%d's logs isn't consistent with Leader's", rf.me)
 			reply.XTerm = rf.logs[args.PrevLogIndex].Term
-			reply.XIndex = rf.firstIndex(reply.Term, args.PrevLogIndex)
+			reply.XIndex = rf.firstIndex(reply.XTerm, args.PrevLogIndex)
 			reply.Success = false
 			return
 		}
