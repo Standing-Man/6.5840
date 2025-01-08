@@ -238,6 +238,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// rf.logs[args.PrevLogIndex].Term == args.PrevLogTerm && rf.currentTerm >= args.Term
 
 	reply.Success = true
+	defer rf.persist()
 
 	// append entry into rf.logs
 	// follow AppendEntry rule 3, 4
@@ -250,16 +251,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.logs[index].Term != args.Entries[index-args.PrevLogIndex-1].Term {
 			// delete the existing entry and all that follow it
 			rf.logs = rf.logs[:index]
-			rf.persist()
 			break
 		}
 		index += 1
 	}
+	/**
+	1. index >= len(rf.logs)
+		=> index-args.PrevLogIndex-1 < len(args.Entries) => ok
+		=> index-args.PrevLogIndex-1 == len(args.Entries) => ok
+	2. index-args.PrevLogIndex-1 >= len(args.Entries) => indicate all logs match
+	3. find an entry can't match Leader's => find entry can't match and delete that all follow it
+	*/
 	// append new entries not already in the log
 	if index-args.PrevLogIndex-1 < len(args.Entries) {
 		Debug(dAppe, "S%d successfully append the entry", rf.me)
 		rf.logs = append(rf.logs, args.Entries[index-args.PrevLogIndex-1:]...)
-		rf.persist()
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -309,16 +315,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// rf.currentTerm == args.Term
 	if rf.currentTerm == args.Term {
+		if rf.state == Leader {
+			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
+			return
+		}
 		if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 			Debug(dVote, "S%d have voted for Candidate %d", rf.me, rf.votedFor)
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 			return
-		}
-		if rf.state == Leader {
-			Debug(dVote, "S%d is a Leader on Current Term %d", rf.me, rf.currentTerm)
-			reply.VoteGranted = false
-			reply.Term = rf.currentTerm
 		}
 	}
 
@@ -469,7 +475,7 @@ func (rf *Raft) CovertToLeader() {
 	rf.sendAppendRPCs(true)
 }
 
-func (rf *Raft) sendAppend(server int, heartbeat bool) {
+func (rf *Raft) sendAppend(server int) {
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -495,21 +501,17 @@ func (rf *Raft) sendAppend(server int, heartbeat bool) {
 				rf.setElectionTime()
 				return
 			}
+			// reply.Term <= rf.currentTerm
 			if rf.currentTerm != args.Term || rf.state != Leader {
 				// compare the current term with the term you sent in your appendEntry RPC
 				return
 			}
 			if !reply.Success {
 				// Condition: log inconsistency
-				index := rf.pickupNext(reply)
-				Debug(dRepl, "S%d update nextIndex[%d] %d -> %d", rf.me, server, rf.nextIndex[server], index)
-				rf.nextIndex[server] = index
+				rf.nextIndex[server] = rf.pickupNext(reply)
 				rf.sendAppendRPCs(false)
 			} else {
 				//Successfully append entry
-				if heartbeat {
-					return
-				}
 				Debug(dRepl, "S%d update matchIndex[%d] %d -> %d", rf.me, server, rf.matchIndex[server], args.PrevLogIndex+len(args.Entries))
 				Debug(dRepl, "S%d update nextIndex[%d] %d -> %d", rf.me, server, rf.nextIndex[server], args.PrevLogIndex+len(args.Entries)+1)
 				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
@@ -550,7 +552,7 @@ func (rf *Raft) sendAppendRPCs(heartbeat bool) {
 		}
 		lastLogIndex := len(rf.logs) - 1
 		if lastLogIndex >= rf.nextIndex[i] || heartbeat {
-			rf.sendAppend(i, heartbeat)
+			rf.sendAppend(i)
 		}
 	}
 }
@@ -568,14 +570,14 @@ func (rf *Raft) requestVote(server int, arg *RequestVoteArgs, votes *int) {
 			rf.setElectionTime()
 			return
 		}
+		if rf.state != Candidate || rf.currentTerm != arg.Term {
+			return
+		}
 
 		if reply.VoteGranted {
 			*votes += 1
 			if *votes >= (len(rf.peers)/2)+1 {
-				if rf.currentTerm == arg.Term && rf.state == Candidate {
-					rf.CovertToLeader()
-					rf.sendAppendRPCs(true)
-				}
+				rf.CovertToLeader()
 			}
 		}
 	}
@@ -600,18 +602,21 @@ func (rf *Raft) requestVoteRPCs() {
 
 func (rf *Raft) checkCommit() {
 	for N := rf.commitIndex + 1; N < len(rf.logs); N++ {
+		if rf.logs[N].Term != rf.currentTerm {
+			continue
+		}
 		count := 1
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
-			if rf.matchIndex[i] >= N && rf.logs[N].Term == rf.currentTerm {
+			if rf.matchIndex[i] >= N {
 				count++
-			}
-			if count >= (len(rf.peers)/2)+1 && rf.state == Leader {
-				Debug(dCommit, "S%d push the commitIndex to %d", rf.me, N)
-				rf.commitIndex = N
-				break
+				if count >= (len(rf.peers)/2)+1 {
+					Debug(dCommit, "S%d push the commitIndex to %d", rf.me, N)
+					rf.commitIndex = N
+					break
+				}
 			}
 		}
 	}
