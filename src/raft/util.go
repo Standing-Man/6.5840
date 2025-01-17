@@ -1,6 +1,5 @@
 package raft
 
-
 import (
 	"fmt"
 	"log"
@@ -41,7 +40,12 @@ const (
 	dTimer   logTopic = "TIMR"
 	dTrace   logTopic = "TRCE"
 	dVote    logTopic = "VOTE"
+	dCtoF    logTopic = "CTOF"
+	dCtoL    logTopic = "CTOL"
+	dAppe    logTopic = "APPE"
 	dWarn    logTopic = "WARN"
+	dAppl    logTopic = "APPL"
+	dRepl    logTopic = "REPL"
 )
 
 var debugStart time.Time
