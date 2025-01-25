@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"math/big"
 	"sync"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -73,6 +74,7 @@ func (ck *Clerk) Get(key string) string {
 				ck.LeaderId = -1
 			}
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -114,6 +116,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.LeaderId = -1
 			}
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

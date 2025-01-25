@@ -39,8 +39,9 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	table  map[int64]Record
-	memory map[string]string
+	table     map[int64]Record
+	memory    map[string]string
+	persister *raft.Persister
 }
 
 type Record struct {
@@ -149,7 +150,7 @@ func (kv *KVServer) applyHandlerLoop() {
 				}
 			}
 		default:
-			time.Sleep(25 * time.Microsecond)
+			time.Sleep(10 * time.Microsecond)
 		}
 	}
 }
@@ -237,6 +238,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.persister = persister
 	go kv.applyHandlerLoop()
 
 	return kv
