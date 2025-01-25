@@ -1,28 +1,32 @@
 package kvraft
 
 import (
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
-	"log"
-	"sync"
-	"sync/atomic"
 )
 
-const Debug = false
+type OpType int
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
+const (
+	G OpType = iota
+	P
+	A
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId int64
+	SeqNo    int64
+	Key      string
+	Value    string
+	Type     OpType
 }
 
 type KVServer struct {
@@ -35,19 +39,151 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	table  map[int64]Record
+	memory map[string]string
 }
 
+type Record struct {
+	SeqNo      int64
+	RepluValue string
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo > args.SeqNo {
+			panic("the get request is outdate")
+		}
+		if entry.SeqNo == args.SeqNo {
+			reply.Value = entry.RepluValue
+			reply.Err = OK
+			return
+		}
+	}
+	command := Op{
+		Type:     G,
+		Key:      args.Key,
+		ClientId: args.ClientId,
+		SeqNo:    args.SeqNo,
+	}
+	kv.rf.Start(command)
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo > args.SeqNo {
+			panic("the get request is outdate")
+		}
+		if entry.SeqNo == args.SeqNo {
+			reply.Err = OK
+			return
+		}
+	}
+	command := Op{
+		Type:     P,
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientId: args.ClientId,
+		SeqNo:    args.SeqNo,
+	}
+	kv.rf.Start(command)
+
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo > args.SeqNo {
+			panic("the get request is outdate")
+		}
+		if entry.SeqNo == args.SeqNo {
+			reply.Err = OK
+			return
+		}
+	}
+	command := Op{
+		Type:     A,
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientId: args.ClientId,
+		SeqNo:    args.SeqNo,
+	}
+	kv.rf.Start(command)
+}
+
+func (kv *KVServer) applyHandlerLoop() {
+	for {
+		select {
+		case msg, ok := <-kv.applyCh:
+			if !ok {
+				return
+			}
+			if msg.CommandValid {
+				committedCommand := msg.Command.(Op)
+				if committedCommand.Type == G {
+					kv.GetMsgHandler(msg)
+				} else {
+					kv.PAMsgHandler(msg)
+				}
+			}
+		default:
+			time.Sleep(25 * time.Microsecond)
+		}
+	}
+}
+
+func (kv *KVServer) GetMsgHandler(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	committedCommand := msg.Command.(Op)
+	if entry, ok := kv.table[committedCommand.ClientId]; ok {
+		if entry.SeqNo >= committedCommand.SeqNo {
+			return
+		}
+	}
+	value := kv.memory[committedCommand.Key]
+	kv.table[committedCommand.ClientId] = Record{
+		SeqNo:      committedCommand.SeqNo,
+		RepluValue: value,
+	}
+}
+
+func (kv *KVServer) PAMsgHandler(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	committedCommand := msg.Command.(Op)
+	if entry, ok := kv.table[committedCommand.ClientId]; ok {
+		if entry.SeqNo >= committedCommand.SeqNo {
+			return
+		}
+	}
+	if committedCommand.Type == P {
+		kv.memory[committedCommand.Key] = committedCommand.Value
+	} else if committedCommand.Type == A {
+		kv.memory[committedCommand.Key] += committedCommand.Value
+	}
+	kv.table[committedCommand.ClientId] = Record{
+		SeqNo: committedCommand.SeqNo,
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -91,11 +227,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.memory = make(map[string]string)
+	kv.table = make(map[int64]Record)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.applyHandlerLoop()
 
 	return kv
 }

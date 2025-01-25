@@ -34,7 +34,7 @@
   - [x] leader backs up quickly over incorrect follower logs
   - [x] RPC counts aren't too high
 
-- Part 3C: persistence => Just pass ten thousand times
+- Part 3C: persistence => Pass ten thousand times
   - [x] basic persistence
   - [x] more persistence
   - [x] partitioned leader and one follower crash, leader restarts
@@ -44,10 +44,30 @@
   - [x] churn
   - [x] unreliable churn
   
-- Part 3D: log compaction
+- Part 3D: log compaction => Pass ten thousand times
   - [x] snapshots basic
   - [x] install snapshots (disconnect)
   - [x] install snapshots (disconnect+unreliable)
   - [x] install snapshots (crash)
   - [x] install snapshots (unreliable+crash)
   - [x] crash and restart all servers
+
+## Lab 4: Fault-tolerant Key/Value Service
+
+- Part 4A: Key/value service without snapshots
+  - [ ] one client
+  - [ ] ops complete fast enough
+  - [ ] many clients
+  - [ ] unreliable net, many clients
+  - [ ] concurrent append to same key, unreliable
+  - [ ] progress in majority
+  - [ ] no progress in minority
+  - [ ] completion after heal
+  - [ ] partitions, one client
+  - [ ] partitions, many clients
+  - [ ] restarts, one client
+  - [ ] restarts, many clients
+  - [ ] unreliable net, restarts, many clients
+  - [ ] restarts, partitions, many clients
+  - [ ] unreliable net, restarts, partitions, many clients
+  - [ ] unreliable net, restarts, partitions, random keys, many clients
