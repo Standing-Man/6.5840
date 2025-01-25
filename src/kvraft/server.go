@@ -49,13 +49,12 @@ type Record struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
 	if entry, ok := kv.table[args.ClientId]; ok {
 		if entry.SeqNo > args.SeqNo {
 			panic("the get request is outdate")
@@ -63,9 +62,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		if entry.SeqNo == args.SeqNo {
 			reply.Value = entry.RepluValue
 			reply.Err = OK
+			kv.mu.Unlock()
 			return
 		}
 	}
+	kv.mu.Unlock()
 	command := Op{
 		Type:     G,
 		Key:      args.Key,
@@ -76,22 +77,23 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
 	if entry, ok := kv.table[args.ClientId]; ok {
 		if entry.SeqNo > args.SeqNo {
 			panic("the get request is outdate")
 		}
 		if entry.SeqNo == args.SeqNo {
 			reply.Err = OK
+			kv.mu.Unlock()
 			return
 		}
 	}
+	kv.mu.Unlock()
 	command := Op{
 		Type:     P,
 		Key:      args.Key,
@@ -104,22 +106,23 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
 	if entry, ok := kv.table[args.ClientId]; ok {
 		if entry.SeqNo > args.SeqNo {
 			panic("the get request is outdate")
 		}
 		if entry.SeqNo == args.SeqNo {
 			reply.Err = OK
+			kv.mu.Unlock()
 			return
 		}
 	}
+	kv.mu.Unlock()
 	command := Op{
 		Type:     A,
 		Key:      args.Key,
