@@ -39,56 +39,102 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	table     map[int64]Record
-	memory    map[string]string
-	persister *raft.Persister
+	table    map[int64]Record
+	memory   map[string]string
+	notifyCh map[int]chan Op
 }
 
 type Record struct {
-	SeqNo      int64
-	RepluValue string
+	SeqNo int64
+	Reply Reply
+}
+
+type Reply struct {
+	Err        Err
+	ReplyValue string
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.mu.Lock()
 	_, isLeader := kv.rf.GetState()
+
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
-	kv.mu.Lock()
 	if entry, ok := kv.table[args.ClientId]; ok {
-		if entry.SeqNo > args.SeqNo {
-			panic("the get request is outdate")
-		}
 		if entry.SeqNo == args.SeqNo {
-			reply.Value = entry.RepluValue
-			reply.Err = OK
+			reply.Err = entry.Reply.Err
+			reply.Value = entry.Reply.ReplyValue
 			kv.mu.Unlock()
 			return
 		}
 	}
+
 	kv.mu.Unlock()
+
 	command := Op{
 		Type:     G,
 		Key:      args.Key,
 		ClientId: args.ClientId,
 		SeqNo:    args.SeqNo,
 	}
-	kv.rf.Start(command)
-}
 
-func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	_, isLeader := kv.rf.GetState()
+	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+
+	notifyCh := make(chan Op, 1)
 	kv.mu.Lock()
-	if entry, ok := kv.table[args.ClientId]; ok {
-		if entry.SeqNo > args.SeqNo {
-			panic("the get request is outdate")
+	kv.notifyCh[index] = notifyCh
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.notifyCh, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case committedCommand := <-notifyCh:
+		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
+			kv.mu.Lock()
+			if value, existing := kv.memory[committedCommand.Key]; existing {
+				reply.Err = OK
+				reply.Value = value
+			} else {
+				reply.Err = ErrNoKey
+				reply.Value = ""
+			}
+			kv.table[committedCommand.ClientId] = Record{
+				SeqNo: committedCommand.SeqNo,
+				Reply: Reply{
+					Err:        reply.Err,
+					ReplyValue: reply.Value,
+				},
+			}
+			kv.mu.Unlock()
 		}
-		if entry.SeqNo == args.SeqNo {
+	case <-time.After(50 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
+}
+
+func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.mu.Lock()
+	_, isLeader := kv.rf.GetState()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo >= args.SeqNo {
 			reply.Err = OK
 			kv.mu.Unlock()
 			return
@@ -102,22 +148,45 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientId: args.ClientId,
 		SeqNo:    args.SeqNo,
 	}
-	kv.rf.Start(command)
-
-}
-
-func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	_, isLeader := kv.rf.GetState()
+	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+
+	notifyCh := make(chan Op, 1)
 	kv.mu.Lock()
-	if entry, ok := kv.table[args.ClientId]; ok {
-		if entry.SeqNo > args.SeqNo {
-			panic("the get request is outdate")
+	kv.notifyCh[index] = notifyCh
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.notifyCh, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case committedCommand := <-notifyCh:
+		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
+			reply.Err = OK
 		}
-		if entry.SeqNo == args.SeqNo {
+	case <-time.After(50 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
+}
+
+func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.mu.Lock()
+	_, isLeader := kv.rf.GetState()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo >= args.SeqNo {
 			reply.Err = OK
 			kv.mu.Unlock()
 			return
@@ -131,62 +200,55 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientId: args.ClientId,
 		SeqNo:    args.SeqNo,
 	}
-	kv.rf.Start(command)
+	index, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	notifyCh := make(chan Op, 1)
+	kv.mu.Lock()
+	kv.notifyCh[index] = notifyCh
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.notifyCh, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case committedCommand := <-notifyCh:
+		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
+			reply.Err = OK
+		}
+	case <-time.After(50 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
 }
 
 func (kv *KVServer) applyHandlerLoop() {
-	for {
-		select {
-		case msg, ok := <-kv.applyCh:
-			if !ok {
-				return
-			}
-			if msg.CommandValid {
-				committedCommand := msg.Command.(Op)
-				if committedCommand.Type == G {
-					kv.GetMsgHandler(msg)
-				} else {
-					kv.PAMsgHandler(msg)
+	for msg := range kv.applyCh {
+		kv.mu.Lock()
+		if msg.CommandValid {
+			committedCommand := msg.Command.(Op)
+			if entry, ok := kv.table[committedCommand.ClientId]; !ok || entry.SeqNo < committedCommand.SeqNo {
+				if committedCommand.Type == P {
+					kv.memory[committedCommand.Key] = committedCommand.Value
+				} else if committedCommand.Type == A {
+					kv.memory[committedCommand.Key] += committedCommand.Value
+				}
+				if committedCommand.Type == P || committedCommand.Type == A {
+					kv.table[committedCommand.ClientId] = Record{
+						SeqNo: committedCommand.SeqNo,
+					}
 				}
 			}
-		default:
-			time.Sleep(10 * time.Microsecond)
+			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
+				ch <- committedCommand
+				close(ch)
+			}
 		}
-	}
-}
-
-func (kv *KVServer) GetMsgHandler(msg raft.ApplyMsg) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	committedCommand := msg.Command.(Op)
-	if entry, ok := kv.table[committedCommand.ClientId]; ok {
-		if entry.SeqNo >= committedCommand.SeqNo {
-			return
-		}
-	}
-	value := kv.memory[committedCommand.Key]
-	kv.table[committedCommand.ClientId] = Record{
-		SeqNo:      committedCommand.SeqNo,
-		RepluValue: value,
-	}
-}
-
-func (kv *KVServer) PAMsgHandler(msg raft.ApplyMsg) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	committedCommand := msg.Command.(Op)
-	if entry, ok := kv.table[committedCommand.ClientId]; ok {
-		if entry.SeqNo >= committedCommand.SeqNo {
-			return
-		}
-	}
-	if committedCommand.Type == P {
-		kv.memory[committedCommand.Key] = committedCommand.Value
-	} else if committedCommand.Type == A {
-		kv.memory[committedCommand.Key] += committedCommand.Value
-	}
-	kv.table[committedCommand.ClientId] = Record{
-		SeqNo: committedCommand.SeqNo,
+		kv.mu.Unlock()
 	}
 }
 
@@ -233,12 +295,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.memory = make(map[string]string)
 	kv.table = make(map[int64]Record)
+	kv.notifyCh = make(map[int]chan Op)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.persister = persister
 	go kv.applyHandlerLoop()
 
 	return kv
