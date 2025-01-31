@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,9 +40,12 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	table    map[int64]Record
-	memory   map[string]string
+	Table    map[int64]Record
+	Memory   map[string]string
 	notifyCh map[int]chan Op
+
+	persister      *raft.Persister
+	committedIndex int
 }
 
 type Record struct {
@@ -63,7 +67,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
-	if entry, ok := kv.table[args.ClientId]; ok {
+	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo == args.SeqNo {
 			reply.Err = entry.Reply.Err
 			reply.Value = entry.Reply.ReplyValue
@@ -102,14 +106,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case committedCommand := <-notifyCh:
 		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
 			kv.mu.Lock()
-			if value, existing := kv.memory[committedCommand.Key]; existing {
+			if value, existing := kv.Memory[committedCommand.Key]; existing {
 				reply.Err = OK
 				reply.Value = value
 			} else {
 				reply.Err = ErrNoKey
 				reply.Value = ""
 			}
-			kv.table[committedCommand.ClientId] = Record{
+			kv.Table[committedCommand.ClientId] = Record{
 				SeqNo: committedCommand.SeqNo,
 				Reply: Reply{
 					Err:        reply.Err,
@@ -133,7 +137,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	if entry, ok := kv.table[args.ClientId]; ok {
+	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo >= args.SeqNo {
 			reply.Err = OK
 			kv.mu.Unlock()
@@ -185,7 +189,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	if entry, ok := kv.table[args.ClientId]; ok {
+	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo >= args.SeqNo {
 			reply.Err = OK
 			kv.mu.Unlock()
@@ -231,24 +235,58 @@ func (kv *KVServer) applyHandlerLoop() {
 		kv.mu.Lock()
 		if msg.CommandValid {
 			committedCommand := msg.Command.(Op)
-			if entry, ok := kv.table[committedCommand.ClientId]; !ok || entry.SeqNo < committedCommand.SeqNo {
+			kv.committedIndex = msg.CommandIndex
+			if entry, ok := kv.Table[committedCommand.ClientId]; !ok || entry.SeqNo < committedCommand.SeqNo {
 				if committedCommand.Type == P {
-					kv.memory[committedCommand.Key] = committedCommand.Value
+					kv.Memory[committedCommand.Key] = committedCommand.Value
 				} else if committedCommand.Type == A {
-					kv.memory[committedCommand.Key] += committedCommand.Value
+					kv.Memory[committedCommand.Key] += committedCommand.Value
 				}
 				if committedCommand.Type == P || committedCommand.Type == A {
-					kv.table[committedCommand.ClientId] = Record{
+					kv.Table[committedCommand.ClientId] = Record{
 						SeqNo: committedCommand.SeqNo,
 					}
 				}
 			}
+
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				snapshot := kv.createSnapshot()
+				kv.rf.Snapshot(kv.committedIndex, snapshot)
+			}
+
 			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
 				ch <- committedCommand
 				close(ch)
 			}
 		}
+		if msg.SnapshotValid {
+			kv.readSnapshot(msg.Snapshot)
+			kv.committedIndex = msg.SnapshotIndex
+		}
 		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) createSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.Table)
+	e.Encode(kv.committedIndex)
+	return w.Bytes()
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var table map[int64]Record
+	var memory map[string]string
+	if d.Decode(&table) == nil &&
+		d.Decode(&memory) == nil {
+		kv.Table = table
+		kv.Memory = memory
 	}
 }
 
@@ -293,12 +331,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.memory = make(map[string]string)
-	kv.table = make(map[int64]Record)
+	kv.Memory = make(map[string]string)
+	kv.Table = make(map[int64]Record)
 	kv.notifyCh = make(map[int]chan Op)
+	kv.persister = persister
+	kv.committedIndex = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.readSnapshot(kv.persister.ReadSnapshot())
 
 	// You may need initialization code here.
 	go kv.applyHandlerLoop()
