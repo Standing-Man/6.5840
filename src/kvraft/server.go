@@ -271,7 +271,7 @@ func (kv *KVServer) createSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.Table)
-	e.Encode(kv.committedIndex)
+	e.Encode(kv.Memory)
 	return w.Bytes()
 }
 
