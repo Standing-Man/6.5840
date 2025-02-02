@@ -224,6 +224,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRPCArgs, reply *InstallSnap
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if index <= rf.lastIncludedIndex {
 		return
 	}
@@ -240,8 +241,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// delete the log including the index
 	rf.logs.CutStart(index + 1)
-
-	rf.mu.Unlock()
 }
 
 type AppendEntriesArgs struct {
