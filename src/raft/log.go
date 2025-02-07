@@ -32,7 +32,7 @@ func (l *Logs) GetTermByIndex(index int) int {
 	if index < l.StartIndex {
 		panic("failed to get the term by index, because the entry into the snapshot")
 	}
-	if index > l.Len() {
+	if index >= l.Len() {
 		panic("failed to get the term by index, because the entry have never had")
 	}
 	return l.Entries[index-l.StartIndex].Term
@@ -47,7 +47,7 @@ func (l *Logs) GetCommandByIndex(index int) interface{} {
 	if index < l.StartIndex {
 		panic("failed to get the term by index, because the entry into the snapshot")
 	}
-	if index > l.Len() {
+	if index >= l.Len() {
 		panic("failed to get the term by index, because the entry have never had")
 	}
 	return l.Entries[index-l.StartIndex].Command

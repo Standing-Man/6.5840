@@ -28,6 +28,7 @@ type Op struct {
 	Key      string
 	Value    string
 	Type     OpType
+	Term     int
 }
 
 type KVServer struct {
@@ -60,13 +61,14 @@ type Reply struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
-	_, isLeader := kv.rf.GetState()
+	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 		return
 	}
+
 	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo == args.SeqNo {
 			reply.Err = entry.Reply.Err
@@ -83,6 +85,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Key:      args.Key,
 		ClientId: args.ClientId,
 		SeqNo:    args.SeqNo,
+		Term:     term,
 	}
 
 	index, _, isLeader := kv.rf.Start(command)
@@ -121,15 +124,17 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				},
 			}
 			kv.mu.Unlock()
+		} else {
+			reply.Err = ErrWrongLeader
 		}
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
-	_, isLeader := kv.rf.GetState()
+	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -151,6 +156,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 		Value:    args.Value,
 		ClientId: args.ClientId,
 		SeqNo:    args.SeqNo,
+		Term:     term,
 	}
 	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
@@ -173,15 +179,17 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	case committedCommand := <-notifyCh:
 		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
 			reply.Err = OK
+		} else {
+			reply.Err = ErrWrongLeader
 		}
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
-	_, isLeader := kv.rf.GetState()
+	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -196,6 +204,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 	}
+
 	kv.mu.Unlock()
 	command := Op{
 		Type:     A,
@@ -203,6 +212,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 		Value:    args.Value,
 		ClientId: args.ClientId,
 		SeqNo:    args.SeqNo,
+		Term:     term,
 	}
 	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
@@ -224,8 +234,10 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	case committedCommand := <-notifyCh:
 		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
 			reply.Err = OK
+		} else {
+			reply.Err = ErrWrongLeader
 		}
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
 }
@@ -234,6 +246,9 @@ func (kv *KVServer) applyHandlerLoop() {
 	for msg := range kv.applyCh {
 		kv.mu.Lock()
 		if msg.CommandValid {
+			if msg.CommandIndex <= kv.committedIndex {
+				continue
+			}
 			committedCommand := msg.Command.(Op)
 			kv.committedIndex = msg.CommandIndex
 			if entry, ok := kv.Table[committedCommand.ClientId]; !ok || entry.SeqNo < committedCommand.SeqNo {
@@ -249,21 +264,30 @@ func (kv *KVServer) applyHandlerLoop() {
 				}
 			}
 
+			term, isLeader := kv.rf.GetState()
+
+			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok && isLeader && term == committedCommand.Term {
+				ch <- committedCommand
+				close(ch)
+			}
+
 			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
 				snapshot := kv.createSnapshot()
 				kv.rf.Snapshot(kv.committedIndex, snapshot)
 			}
-
-			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
-				ch <- committedCommand
-				close(ch)
-			}
 		}
 		if msg.SnapshotValid {
+			if msg.SnapshotIndex <= kv.committedIndex {
+				continue
+			}
 			kv.readSnapshot(msg.Snapshot)
 			kv.committedIndex = msg.SnapshotIndex
 		}
 		kv.mu.Unlock()
+
+		if kv.killed() {
+			return
+		}
 	}
 }
 

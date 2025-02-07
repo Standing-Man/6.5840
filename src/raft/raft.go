@@ -187,11 +187,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRPCArgs, reply *InstallSnap
 		reply.Term = rf.currentTerm
 		return
 	}
-	defer rf.persist()
 
 	if rf.currentTerm < args.Term {
 		rf.CovertToFollower(args.Term)
 	}
+
+	defer rf.persist()
 
 	reply.Term = rf.currentTerm
 
@@ -209,9 +210,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRPCArgs, reply *InstallSnap
 		// clear the logs and set the begin of logs
 		rf.logs.Entries = []Entry{}
 		rf.logs.StartIndex = rf.lastIncludedIndex + 1
-	}
-
-	if args.LastIncludedIndex >= rf.logs.StartIndex && args.LastIncludedIndex < rf.logs.Len() {
+	} else {
 		rf.logs.CutStart(args.LastIncludedIndex + 1)
 	}
 
