@@ -52,22 +52,33 @@
   - [x] install snapshots (unreliable+crash)
   - [x] crash and restart all servers
 
-## Lab 4: Fault-tolerant Key/Value Service
+## Lab 4: Fault-tolerant Key/Value Service => Pass ten thousand times
 
 - Part 4A: Key/value service without snapshots
-  - [ ] one client
-  - [ ] ops complete fast enough
-  - [ ] many clients
-  - [ ] unreliable net, many clients
-  - [ ] concurrent append to same key, unreliable
-  - [ ] progress in majority
-  - [ ] no progress in minority
-  - [ ] completion after heal
-  - [ ] partitions, one client
-  - [ ] partitions, many clients
-  - [ ] restarts, one client
-  - [ ] restarts, many clients
-  - [ ] unreliable net, restarts, many clients
-  - [ ] restarts, partitions, many clients
-  - [ ] unreliable net, restarts, partitions, many clients
-  - [ ] unreliable net, restarts, partitions, random keys, many clients
+  - [x] one client
+  - [x] ops complete fast enough
+  - [x] many clients
+  - [x] unreliable net, many clients
+  - [x] concurrent append to same key, unreliable
+  - [x] progress in majority
+  - [x] no progress in minority
+  - [x] completion after heal
+  - [x] partitions, one client
+  - [x] partitions, many clients
+  - [x] restarts, one client
+  - [x] restarts, many clients
+  - [x] unreliable net, restarts, many clients
+  - [x] restarts, partitions, many clients
+  - [x] unreliable net, restarts, partitions, many clients
+  - [x] unreliable net, restarts, partitions, random keys, many clients
+
+- Part 4B: Key/value service with snapshots
+  - [x] InstallSnapshot RPC
+  - [x] snapshot size is reasonable
+  - [x] ops complete fast enough
+  - [x] restarts, snapshots, one client
+  - [x] restarts, snapshots, many clients
+  - [x] unreliable net, snapshots, many clients
+  - [x] unreliable net, restarts, snapshots, many clients
+  - [x] unreliable net, restarts, partitions, snapshots, many clients
+  - [x] unreliable net, restarts, partitions, snapshots, random keys, many clients
