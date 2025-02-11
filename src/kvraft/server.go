@@ -60,14 +60,14 @@ type Reply struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.mu.Lock()
 	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
 		return
 	}
+
+	kv.mu.Lock()
 
 	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo == args.SeqNo {
@@ -133,15 +133,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
 	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
 		return
 	}
 
+	kv.mu.Lock()
 	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo >= args.SeqNo {
 			reply.Err = OK
@@ -188,14 +187,14 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
 	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
 		return
 	}
+
+	kv.mu.Lock()
 
 	if entry, ok := kv.Table[args.ClientId]; ok {
 		if entry.SeqNo >= args.SeqNo {
