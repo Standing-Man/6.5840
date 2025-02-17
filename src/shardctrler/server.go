@@ -1,6 +1,7 @@
 package shardctrler
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -18,9 +19,10 @@ type ShardCtrler struct {
 
 	// Your data here.
 
-	configs  []Config // indexed by config num
-	table    map[int64]Record
-	notifyCh map[int]chan Op
+	configs        []Config // indexed by config num
+	table          map[int64]Record
+	notifyCh       map[int]chan Op
+	committedIndex int
 }
 
 type Record struct {
@@ -68,7 +70,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 
 	sc.mu.Lock()
 	if entry, ok := sc.table[args.ClientId]; ok {
-		if entry.SeqNo >= args.SeqNo {
+		if entry.SeqNo == args.SeqNo {
 			reply.Err = OK
 			sc.mu.Unlock()
 			return
@@ -108,6 +110,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 			reply.WrongLeader = true
 		}
 	case <-time.After(100 * time.Millisecond):
+		reply.Err = ErrTimeout
 	}
 
 }
@@ -121,7 +124,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 	sc.mu.Lock()
 	if entry, ok := sc.table[args.ClientId]; ok {
-		if entry.SeqNo >= args.SeqNo {
+		if entry.SeqNo == args.SeqNo {
 			reply.Err = OK
 			sc.mu.Unlock()
 			return
@@ -161,6 +164,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 			reply.WrongLeader = true
 		}
 	case <-time.After(100 * time.Millisecond):
+		reply.Err = ErrTimeout
 	}
 }
 
@@ -173,7 +177,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 
 	sc.mu.Lock()
 	if entry, ok := sc.table[args.ClientId]; ok {
-		if entry.SeqNo >= args.SeqNo {
+		if entry.SeqNo == args.SeqNo {
 			reply.Err = OK
 			sc.mu.Unlock()
 			return
@@ -213,6 +217,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 			reply.WrongLeader = true
 		}
 	case <-time.After(100 * time.Millisecond):
+		reply.Err = ErrTimeout
 	}
 }
 
@@ -279,6 +284,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 			reply.WrongLeader = true
 		}
 	case <-time.After(100 * time.Millisecond):
+		reply.Err = ErrTimeout
 	}
 }
 
@@ -300,10 +306,7 @@ func copyShards(src [NShards]int) [NShards]int {
 
 func (sc *ShardCtrler) joinServers(config *Config, servers map[int][]string) {
 	for gid, servers := range servers {
-		sz := len(config.Groups)
-		if sz < NShards {
-			sc.reBalanceForJoin(config, gid)
-		}
+		sc.reBalanceForJoin(config, gid)
 		config.Groups[gid] = servers
 	}
 }
@@ -324,34 +327,46 @@ func (sc *ShardCtrler) joinServers(config *Config, servers map[int][]string) {
 */
 func (sc *ShardCtrler) reBalanceForJoin(config *Config, gid int) {
 	numGroups := countNumG(config)
-	moveShards := NShards / (numGroups + 1)
+	if numGroups >= NShards {
+		// 确保replica groups的个数要小于分片的个数，即一个replica group需要负责多个分片
+		return
+	}
 	if numGroups == 0 {
+		// 此时分片没有任何replica groups负责
 		for i := 0; i < NShards; i++ {
 			config.Shards[i] = gid
 		}
 		return
 	}
+	// 需要迁移的shards的个数
+	moveShards := NShards / (numGroups + 1)
+	// 存储每一个replica group需要负责那些shards
 	gidShardsCount := make(map[int]([]int))
 	for i := 0; i < NShards; i++ {
+		if config.Shards[i] == 0 {
+			panic(fmt.Sprintf("Join: un-allocate shards: %d", i))
+		}
+		if _, ok := config.Groups[config.Shards[i]]; !ok {
+			panic(fmt.Sprintf("Join: there doesn't have replica group: %v", config.Shards[i]))
+		}
 		gidShardsCount[config.Shards[i]] = append(gidShardsCount[config.Shards[i]], i)
 	}
+	// 以replica group负责的分片个数降序排序
 	sortedGIDs := sortKeysDes(gidShardsCount)
 	index, length := 0, len(sortedGIDs)
-	for {
+	for moveShards != 0 {
 		shardsId := gidShardsCount[sortedGIDs[index]]
 		id := shardsId[0]
 		shardsId = shardsId[1:]
 		config.Shards[id] = gid
 		moveShards -= 1
 		gidShardsCount[sortedGIDs[index]] = shardsId
-		if moveShards == 0 {
-			break
-		}
 		index = (index + 1) % length
 	}
 }
 
 // Sort by the number of shards managed by replica groups. (descending order)
+// [1:2,2:4,3:1] => [2,1,3]
 func sortKeysDes(m map[int][]int) []int {
 	type kv struct {
 		key    int
@@ -363,7 +378,7 @@ func sortKeysDes(m map[int][]int) []int {
 		kvList = append(kvList, kv{k, len(v)})
 	}
 
-	sort.Slice(kvList, func(i, j int) bool {
+	sort.SliceStable(kvList, func(i, j int) bool {
 		return kvList[i].length > kvList[j].length
 	})
 
@@ -384,12 +399,26 @@ func reverse(arr []int) {
 	}
 }
 
+func checkUnUsedGroups(config *Config) []int {
+	used := make(map[int]int)
+	unUsed := []int{}
+	for _, gid := range config.Shards {
+		used[gid] += 1
+	}
+	for gid := range config.Groups {
+		if _, ok := used[gid]; !ok {
+			unUsed = append(unUsed, gid)
+		}
+	}
+	return unUsed
+}
+
 func (sc *ShardCtrler) LeaveGroups(config *Config, GIDs []int) {
 	for _, gid := range GIDs {
 		delete(config.Groups, gid)
 		sc.reBalanceForLeave(config, gid)
-		if countNumG(config) == 0 && len(config.Groups) != 0 {
-			for gid := range config.Groups {
+		if gids := checkUnUsedGroups(config); countNumG(config) < NShards && len(gids) != 0 {
+			for _, gid := range gids {
 				sc.reBalanceForJoin(config, gid)
 			}
 		}
@@ -408,7 +437,7 @@ func countNumG(config *Config) int {
 
 func (sc *ShardCtrler) reBalanceForLeave(config *Config, gid int) {
 	numGroups := countNumG(config)
-	if numGroups == 1 {
+	if numGroups == 1 && config.Shards[0] == gid {
 		for i := 0; i < NShards; i++ {
 			config.Shards[i] = 0
 		}
@@ -431,7 +460,6 @@ func (sc *ShardCtrler) reBalanceForLeave(config *Config, gid int) {
 	delete(gidShardsCount, gid)
 	sortedGIDs := sortKeysDes(gidShardsCount)
 	reverse(sortedGIDs)
-
 	index, length := 0, len(sortedGIDs)
 	for len(moveShards) != 0 {
 		sortedGID := sortedGIDs[index]
@@ -444,6 +472,9 @@ func (sc *ShardCtrler) reBalanceForLeave(config *Config, gid int) {
 }
 
 func (sc *ShardCtrler) moveGToS(config *Config, Shard int, GID int) {
+	if _, ok := config.Groups[GID]; !ok {
+		panic("there don't have this groups")
+	}
 	config.Shards[Shard] = GID
 }
 
@@ -451,47 +482,47 @@ func (sc *ShardCtrler) applyHandlerLoop() {
 	for msg := range sc.applyCh {
 		sc.mu.Lock()
 		if msg.CommandValid {
+			if msg.CommandIndex <= sc.committedIndex {
+				continue
+			}
+			sc.committedIndex = msg.CommandIndex
 			committedCommand := msg.Command.(Op)
-			if entry, ok := sc.table[committedCommand.ClientId]; ok {
-				if entry.SeqNo >= committedCommand.SeqNo {
-					sc.mu.Unlock()
-					continue
+			if entry, ok := sc.table[committedCommand.ClientId]; !ok || entry.SeqNo < committedCommand.SeqNo {
+				sz := len(sc.configs)
+				lastConfig := sc.configs[sz-1]
+				if committedCommand.Type == J {
+					args := committedCommand.Args.JArgs
+					config := Config{
+						Num:    sz,
+						Groups: copyGroups(lastConfig.Groups),
+						Shards: copyShards(lastConfig.Shards),
+					}
+					sc.joinServers(&config, args.Servers)
+					sc.configs = append(sc.configs, config)
+				} else if committedCommand.Type == L {
+					args := committedCommand.Args.LArgs
+					config := Config{
+						Num:    sz,
+						Groups: copyGroups(lastConfig.Groups),
+						Shards: copyShards(lastConfig.Shards),
+					}
+					sc.LeaveGroups(&config, args.GIDs)
+					sc.configs = append(sc.configs, config)
+				} else if committedCommand.Type == M {
+					args := committedCommand.Args.MArgs
+					config := Config{
+						Num:    sz,
+						Groups: copyGroups(lastConfig.Groups),
+						Shards: copyShards(lastConfig.Shards),
+					}
+					sc.moveGToS(&config, args.Shard, args.GID)
+					sc.configs = append(sc.configs, config)
 				}
-			}
-			sz := len(sc.configs)
-			lastConfig := sc.configs[sz-1]
-			if committedCommand.Type == J {
-				args := committedCommand.Args.JArgs
-				config := Config{
-					Num:    sz,
-					Groups: copyGroups(lastConfig.Groups),
-					Shards: copyShards(lastConfig.Shards),
-				}
-				sc.joinServers(&config, args.Servers)
-				sc.configs = append(sc.configs, config)
-			} else if committedCommand.Type == L {
-				args := committedCommand.Args.LArgs
-				config := Config{
-					Num:    sz,
-					Groups: copyGroups(lastConfig.Groups),
-					Shards: copyShards(lastConfig.Shards),
-				}
-				sc.LeaveGroups(&config, args.GIDs)
-				sc.configs = append(sc.configs, config)
-			} else if committedCommand.Type == M {
-				args := committedCommand.Args.MArgs
-				config := Config{
-					Num:    sz,
-					Groups: copyGroups(lastConfig.Groups),
-					Shards: copyShards(lastConfig.Shards),
-				}
-				sc.moveGToS(&config, args.Shard, args.GID)
-				sc.configs = append(sc.configs, config)
-			}
 
-			if committedCommand.Type == J || committedCommand.Type == L || committedCommand.Type == M {
-				sc.table[committedCommand.ClientId] = Record{
-					SeqNo: committedCommand.SeqNo,
+				if committedCommand.Type == J || committedCommand.Type == L || committedCommand.Type == M {
+					sc.table[committedCommand.ClientId] = Record{
+						SeqNo: committedCommand.SeqNo,
+					}
 				}
 			}
 
@@ -499,6 +530,7 @@ func (sc *ShardCtrler) applyHandlerLoop() {
 
 			if ch, ok := sc.notifyCh[msg.CommandIndex]; ok && isLeader && term == committedCommand.Term {
 				ch <- committedCommand
+				close(ch)
 			}
 		}
 		sc.mu.Unlock()
@@ -536,6 +568,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
+	sc.committedIndex = 0
 
 	// Your code here.
 	sc.table = make(map[int64]Record)
