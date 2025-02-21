@@ -82,3 +82,19 @@
   - [x] unreliable net, restarts, snapshots, many clients
   - [x] unreliable net, restarts, partitions, snapshots, many clients
   - [x] unreliable net, restarts, partitions, snapshots, random keys, many clients
+
+## Lab 5: Sharded Key/Value Service
+
+- Part A: The Controller and Static Sharding
+  - [x] Basic leave/join
+  - [x] Historical queries
+  - [x] Move
+  - [x] Concurrent leave/join
+  - [x] Minimal transfers after joins
+  - [x] Minimal transfers after leaves
+  - [x] minimal movement again
+  - [x] Multi-group join/leave
+  - [x] Concurrent multi leave/join
+  - [x] Minimal transfers after multijoins
+  - [x] Minimal transfers after multileaves
+  - [x] Check Same config on servers

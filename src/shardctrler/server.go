@@ -303,12 +303,17 @@ func copyShards(src [NShards]int) [NShards]int {
 	return dst
 }
 
-func (sc *ShardCtrler) joinServers(config *Config, servers map[int][]string) {
+func SortedByGID(servers map[int]([]string)) []int {
 	gids := make([]int, 0, len(servers))
 	for k := range servers {
 		gids = append(gids, k)
 	}
 	sort.Ints(gids)
+	return gids
+}
+
+func (sc *ShardCtrler) joinServers(config *Config, servers map[int][]string) {
+	gids := SortedByGID(servers)
 	for _, gid := range gids {
 		sc.reBalanceForJoin(config, gid)
 		config.Groups[gid] = servers[gid]
@@ -377,26 +382,13 @@ func SortKeysDes(m map[int][]int) []int {
 	return keys
 }
 
-func reverse(arr []int) {
-	left, right := 0, len(arr)-1
-	for left < right {
-		arr[left], arr[right] = arr[right], arr[left]
-		left++
-		right--
-	}
-}
-
 func checkUnUsedGroups(config *Config) []int {
 	used := make(map[int]int)
 	unUsed := []int{}
 	for _, gid := range config.Shards {
 		used[gid] += 1
 	}
-	gids := make([]int, 0, len(config.Groups))
-	for gid := range config.Groups {
-		gids = append(gids, gid)
-	}
-	sort.Ints(gids)
+	gids := SortedByGID(config.Groups)
 	for _, gid := range gids {
 		if _, ok := used[gid]; !ok {
 			unUsed = append(unUsed, gid)
@@ -409,9 +401,9 @@ func (sc *ShardCtrler) LeaveGroups(config *Config, GIDs []int) {
 	for _, gid := range GIDs {
 		delete(config.Groups, gid)
 		sc.reBalanceForLeave(config, gid)
-		if gids := checkUnUsedGroups(config); countNumG(config) < NShards && len(gids) != 0 {
-			for _, gid := range gids {
-				sc.reBalanceForJoin(config, gid)
+		if gids := checkUnUsedGroups(config); countNumG(config) < NShards && len(gids) > 0 {
+			for _, id := range gids {
+				sc.reBalanceForJoin(config, id)
 			}
 		}
 	}
