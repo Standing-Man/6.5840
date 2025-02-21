@@ -1,7 +1,6 @@
 package shardctrler
 
 import (
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -305,9 +304,14 @@ func copyShards(src [NShards]int) [NShards]int {
 }
 
 func (sc *ShardCtrler) joinServers(config *Config, servers map[int][]string) {
-	for gid, servers := range servers {
+	gids := make([]int, 0, len(servers))
+	for k := range servers {
+		gids = append(gids, k)
+	}
+	sort.Ints(gids)
+	for _, gid := range gids {
 		sc.reBalanceForJoin(config, gid)
-		config.Groups[gid] = servers
+		config.Groups[gid] = servers[gid]
 	}
 }
 
@@ -328,31 +332,21 @@ func (sc *ShardCtrler) joinServers(config *Config, servers map[int][]string) {
 func (sc *ShardCtrler) reBalanceForJoin(config *Config, gid int) {
 	numGroups := countNumG(config)
 	if numGroups >= NShards {
-		// 确保replica groups的个数要小于分片的个数，即一个replica group需要负责多个分片
 		return
 	}
 	if numGroups == 0 {
-		// 此时分片没有任何replica groups负责
+		// the shards doesn't have any replica groups to responsible.
 		for i := 0; i < NShards; i++ {
 			config.Shards[i] = gid
 		}
 		return
 	}
-	// 需要迁移的shards的个数
 	moveShards := NShards / (numGroups + 1)
-	// 存储每一个replica group需要负责那些shards
 	gidShardsCount := make(map[int]([]int))
 	for i := 0; i < NShards; i++ {
-		if config.Shards[i] == 0 {
-			panic(fmt.Sprintf("Join: un-allocate shards: %d", i))
-		}
-		if _, ok := config.Groups[config.Shards[i]]; !ok {
-			panic(fmt.Sprintf("Join: there doesn't have replica group: %v", config.Shards[i]))
-		}
 		gidShardsCount[config.Shards[i]] = append(gidShardsCount[config.Shards[i]], i)
 	}
-	// 以replica group负责的分片个数降序排序
-	sortedGIDs := sortKeysDes(gidShardsCount)
+	sortedGIDs := SortKeysDes(gidShardsCount)
 	index, length := 0, len(sortedGIDs)
 	for moveShards != 0 {
 		shardsId := gidShardsCount[sortedGIDs[index]]
@@ -367,27 +361,20 @@ func (sc *ShardCtrler) reBalanceForJoin(config *Config, gid int) {
 
 // Sort by the number of shards managed by replica groups. (descending order)
 // [1:2,2:4,3:1] => [2,1,3]
-func sortKeysDes(m map[int][]int) []int {
-	type kv struct {
-		key    int
-		length int
+func SortKeysDes(m map[int][]int) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
 
-	var kvList []kv
-	for k, v := range m {
-		kvList = append(kvList, kv{k, len(v)})
-	}
-
-	sort.SliceStable(kvList, func(i, j int) bool {
-		return kvList[i].length > kvList[j].length
+	sort.SliceStable(keys, func(i, j int) bool {
+		if len(m[keys[i]]) != len(m[keys[j]]) {
+			return len(m[keys[i]]) > len(m[keys[j]]) // 长度大的在前
+		}
+		return keys[i] > keys[j]
 	})
 
-	sortedKeys := make([]int, len(kvList))
-	for i, kv := range kvList {
-		sortedKeys[i] = kv.key
-	}
-
-	return sortedKeys
+	return keys
 }
 
 func reverse(arr []int) {
@@ -405,7 +392,12 @@ func checkUnUsedGroups(config *Config) []int {
 	for _, gid := range config.Shards {
 		used[gid] += 1
 	}
+	gids := make([]int, 0, len(config.Groups))
 	for gid := range config.Groups {
+		gids = append(gids, gid)
+	}
+	sort.Ints(gids)
+	for _, gid := range gids {
 		if _, ok := used[gid]; !ok {
 			unUsed = append(unUsed, gid)
 		}
@@ -458,15 +450,18 @@ func (sc *ShardCtrler) reBalanceForLeave(config *Config, gid int) {
 		gidShardsCount[config.Shards[i]] = append(gidShardsCount[config.Shards[i]], i)
 	}
 	delete(gidShardsCount, gid)
-	sortedGIDs := sortKeysDes(gidShardsCount)
-	reverse(sortedGIDs)
-	index, length := 0, len(sortedGIDs)
+	sortedGIDs := SortKeysDes(gidShardsCount)
+	index, length := len(sortedGIDs)-1, len(sortedGIDs)
 	for len(moveShards) != 0 {
 		sortedGID := sortedGIDs[index]
 		shardId := moveShards[0]
 		moveShards = moveShards[1:]
 		config.Shards[shardId] = sortedGID
-		index = (index + 1) % length
+		if index == 0 {
+			index = length - 1
+		} else {
+			index = (index - 1) % length
+		}
 	}
 
 }
