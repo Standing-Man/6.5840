@@ -1,17 +1,33 @@
 package shardkv
 
+import (
+	"bytes"
+	"sync"
+	"time"
 
-import "6.5840/labrpc"
-import "6.5840/raft"
-import "sync"
-import "6.5840/labgob"
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
+)
 
+type OpType int
 
+const (
+	G OpType = iota
+	P
+	A
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId int64
+	SeqNo    int64
+	Key      string
+	Value    string
+	Type     OpType
+	Term     int
 }
 
 type ShardKV struct {
@@ -25,15 +41,219 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	table    map[int64]Record
+	memory   map[string]string
+	notifyCh map[int]chan Op
+
+	persister      *raft.Persister
+	committedIndex int
 }
 
+type Record struct {
+	SeqNo int64
+	Reply Reply
+}
+
+type Reply struct {
+	Err        Err
+	ReplyValue string
+}
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	term, isLeader := kv.rf.GetState()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo == args.SeqNo {
+			reply.Err = entry.Reply.Err
+			reply.Value = entry.Reply.ReplyValue
+			kv.mu.Unlock()
+			return
+		}
+	}
+
+	kv.mu.Unlock()
+
+	command := Op{
+		Type:     G,
+		Key:      args.Key,
+		ClientId: args.ClientId,
+		SeqNo:    args.SeqNo,
+		Term:     term,
+	}
+
+	index, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	notifyCh := make(chan Op, 1)
+	kv.mu.Lock()
+	kv.notifyCh[index] = notifyCh
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.notifyCh, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case committedCommand := <-notifyCh:
+		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
+			kv.mu.Lock()
+			if value, existing := kv.memory[committedCommand.Key]; existing {
+				reply.Err = OK
+				reply.Value = value
+			} else {
+				reply.Err = ErrNoKey
+				reply.Value = ""
+			}
+			kv.table[committedCommand.ClientId] = Record{
+				SeqNo: committedCommand.SeqNo,
+				Reply: Reply{
+					Err:        reply.Err,
+					ReplyValue: reply.Value,
+				},
+			}
+			kv.mu.Unlock()
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	term, isLeader := kv.rf.GetState()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	if entry, ok := kv.table[args.ClientId]; ok {
+		if entry.SeqNo >= args.SeqNo {
+			reply.Err = OK
+			kv.mu.Unlock()
+			return
+		}
+	}
+	kv.mu.Unlock()
+	command := Op{
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientId: args.ClientId,
+		SeqNo:    args.SeqNo,
+		Term:     term,
+	}
+	if args.Op == "Put" {
+		command.Type = P
+	} else if args.Op == "Append" {
+		command.Type = A
+	}
+	index, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	notifyCh := make(chan Op, 1)
+	kv.mu.Lock()
+	kv.notifyCh[index] = notifyCh
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.notifyCh, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case committedCommand := <-notifyCh:
+		if committedCommand.ClientId == args.ClientId && committedCommand.SeqNo == args.SeqNo {
+			reply.Err = OK
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func (kv *ShardKV) applier() {
+	for msg := range kv.applyCh {
+		kv.mu.Lock()
+		if msg.CommandValid {
+			if msg.CommandIndex <= kv.committedIndex {
+				continue
+			}
+			committedCommand := msg.Command.(Op)
+			kv.committedIndex = msg.CommandIndex
+			if entry, ok := kv.table[committedCommand.ClientId]; !ok || entry.SeqNo < committedCommand.SeqNo {
+				if committedCommand.Type == P {
+					kv.memory[committedCommand.Key] = committedCommand.Value
+				} else if committedCommand.Type == A {
+					kv.memory[committedCommand.Key] += committedCommand.Value
+				}
+				if committedCommand.Type == P || committedCommand.Type == A {
+					kv.table[committedCommand.ClientId] = Record{
+						SeqNo: committedCommand.SeqNo,
+					}
+				}
+			}
+
+			term, isLeader := kv.rf.GetState()
+
+			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok && isLeader && term == committedCommand.Term {
+				ch <- committedCommand
+				close(ch)
+			}
+
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				snapshot := kv.createSnapshot()
+				kv.rf.Snapshot(kv.committedIndex, snapshot)
+			}
+		}
+		if msg.SnapshotValid {
+			if msg.SnapshotIndex <= kv.committedIndex {
+				continue
+			}
+			kv.readSnapshot(msg.Snapshot)
+			kv.committedIndex = msg.SnapshotIndex
+		}
+		kv.mu.Unlock()
+	}
+}
+
+func (kv *ShardKV) createSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.table)
+	e.Encode(kv.memory)
+	return w.Bytes()
+}
+
+func (kv *ShardKV) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var table map[int64]Record
+	var memory map[string]string
+	if d.Decode(&table) == nil &&
+		d.Decode(&memory) == nil {
+		kv.table = table
+		kv.memory = memory
+	}
 }
 
 // the tester calls Kill() when a ShardKV instance won't
@@ -44,7 +264,6 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 }
-
 
 // servers[] contains the ports of the servers in this group.
 //
@@ -85,13 +304,19 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 
 	// Your initialization code here.
+	kv.memory = make(map[string]string)
+	kv.table = make(map[int64]Record)
+	kv.notifyCh = make(map[int]chan Op)
+	kv.persister = persister
+	kv.committedIndex = 0
 
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.readSnapshot(kv.persister.ReadSnapshot())
 
-
+	go kv.applier()
 	return kv
 }
