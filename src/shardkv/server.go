@@ -8,6 +8,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"6.5840/shardctrler"
 )
 
 type OpType int
@@ -47,6 +48,9 @@ type ShardKV struct {
 
 	persister      *raft.Persister
 	committedIndex int
+
+	mck    *shardctrler.Clerk
+	config shardctrler.Config
 }
 
 type Record struct {
@@ -60,6 +64,12 @@ type Reply struct {
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
+	shardID := key2shard(args.Key)
+	config := kv.getConfig()
+	if config.Shards[shardID] != kv.gid {
+		reply.Err = ErrWrongGroup
+		return
+	}
 	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
@@ -132,6 +142,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	shardID := key2shard(args.Key)
+	config := kv.getConfig()
+	if config.Shards[shardID] != kv.gid {
+		reply.Err = ErrWrongGroup
+		return
+	}
+	
 	term, isLeader := kv.rf.GetState()
 
 	if !isLeader {
@@ -256,6 +273,21 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	}
 }
 
+func (kv *ShardKV) getConfig() shardctrler.Config {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return kv.config
+}
+
+func (kv *ShardKV) queryConfig() {
+	for {
+		kv.mu.Lock()
+		kv.config = kv.mck.Query(-1)
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
@@ -311,12 +343,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.committedIndex = 0
 
 	// Use something like this to talk to the shardctrler:
-	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
+	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.readSnapshot(kv.persister.ReadSnapshot())
 
 	go kv.applier()
+	go kv.queryConfig()
 	return kv
 }
